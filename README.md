@@ -423,6 +423,8 @@ slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
 
 ### Microsoft Teams
 
+> **⚠️ Note:** Microsoft Teams support is implemented according to the official Microsoft Teams Incoming Webhook API documentation but has not been personally tested by the maintainer due to Teams Free tier limitations. The implementation follows the same pattern as other notification platforms (Slack, Discord, Telegram) which have been tested. If you encounter issues, please [report them](https://github.com/drumandbytes/argocd-gitops-updater-action/issues).
+
 **Setup steps:**
 
 1. **Create a Team** (if you don't have one):
