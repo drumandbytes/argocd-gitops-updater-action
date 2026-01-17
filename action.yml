@@ -157,8 +157,6 @@ runs:
 
     - name: Install uv
       uses: astral-sh/setup-uv@v7
-      with:
-        enable-cache: true
 
     - name: Install dependencies
       shell: bash
@@ -283,6 +281,16 @@ runs:
         else
           echo "report=(No detailed update report was generated.)" >> "$GITHUB_OUTPUT"
         fi
+
+    - name: Clean up report files before commit
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        # Remove report files so they don't get committed to the PR
+        rm -f .update-report.txt
+        rm -f .update-config.yaml.report
+        rm -f *.report
+        echo "Cleaned up report files (captured but not committed)"
 
     - name: Create Pull Request
       id: create-pr
