@@ -190,14 +190,15 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        if git diff --quiet ${{ inputs.config-path }}; then
-          echo "changes=false" >> $GITHUB_OUTPUT
-          echo "No discovery changes detected"
-        else
+        # Check for both new and modified files using git status
+        if git status --porcelain ${{ inputs.config-path }} | grep -q .; then
           echo "changes=true" >> $GITHUB_OUTPUT
           echo "Discovery changes detected"
           echo "Changes to ${{ inputs.config-path }}:"
-          git diff ${{ inputs.config-path }}
+          git diff ${{ inputs.config-path }} || echo "(New file created)"
+        else
+          echo "changes=false" >> $GITHUB_OUTPUT
+          echo "No discovery changes detected"
         fi
 
     - name: Create Pull Request for Auto-Discovery
