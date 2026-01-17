@@ -79,6 +79,10 @@ jobs:
 
 ## 📋 Configuration File
 
+You can either **create `.update-config.yaml` manually** or **use auto-discovery to generate it automatically**.
+
+### Manual Configuration
+
 Create `.update-config.yaml` in your repository:
 
 ```yaml
@@ -135,6 +139,30 @@ ignore:
     - name: prometheus
       versionPattern: "^25\\."  # Ignore version 25.x
 ```
+
+### Auto-Discovery (Recommended for Getting Started)
+
+**Don't want to create the config manually?** Use auto-discovery:
+
+```yaml
+- uses: drumandbytes/argocd-gitops-updater-action@v1
+  with:
+    auto-discover: true
+    create-pr: true
+```
+
+This will:
+1. Automatically scan your repository for:
+   - ArgoCD Applications with Helm charts
+   - Kustomize files with Helm chart references
+   - Kubernetes manifests with Docker images
+2. Generate `.update-config.yaml` with all discovered resources
+3. Create a PR with the generated config
+4. **Stop before running updates** (you review and merge the config first)
+
+After merging the auto-discovery PR, subsequent runs will use the config file for updates. You can run auto-discovery periodically to find new resources, or disable it and only use the existing config.
+
+See [Auto-Discovery Workflow](#auto-discovery-workflow) for a complete example.
 
 ## 📖 Inputs
 
@@ -256,6 +284,47 @@ Test without making changes:
       });
 ```
 
+### Performance: Using GitHub Actions Cache
+
+**Highly Recommended!** Add caching to dramatically improve performance (7-10x speedup, 40x for fully cached runs):
+
+```yaml
+steps:
+  - name: Checkout repository
+    uses: actions/checkout@v4
+
+  # Add this cache step BEFORE the updater action
+  - name: Cache registry API responses
+    uses: actions/cache@v4
+    with:
+      path: .registry_cache
+      key: registry-cache-${{ hashFiles('.update-config.yaml') }}-${{ github.run_number }}
+      restore-keys: |
+        registry-cache-${{ hashFiles('.update-config.yaml') }}-
+        registry-cache-
+
+  - name: Update versions
+    uses: drumandbytes/argocd-gitops-updater-action@v1
+    with:
+      config-path: '.update-config.yaml'
+      create-pr: true
+```
+
+**How it works:**
+- The action caches HTTP responses from Docker Hub, ghcr.io, etc. in `.registry_cache/`
+- Without GitHub Actions cache: This directory is lost after each workflow run
+- With GitHub Actions cache: The directory persists between runs for 7 days
+- **Cache key strategy:**
+  - Primary key includes config file hash and run number
+  - Restore-keys allow using previous cache even if config changed
+- **Result:** Registry API calls are cached for 6 hours, dramatically reducing requests
+
+**Cache benefits:**
+- **First run:** Normal speed (no cache)
+- **Second run (same day):** 40x faster (fully cached)
+- **Second run (next day):** 7-10x faster (partial cache, 6-hour expiration)
+- **Avoids rate limits:** Fewer API calls to Docker Hub and other registries
+
 ## 🔐 Authentication Setup
 
 ### Docker Hub (Recommended)
@@ -362,9 +431,9 @@ telegram-chat-id: ${{ secrets.TELEGRAM_CHAT_ID }}
 **Problem**: Too many requests to Docker Hub
 
 **Solution**:
-1. Add Docker Hub authentication (doubles rate limit)
-2. Reduce update frequency (e.g., weekly instead of daily)
-3. Use GitHub Actions cache (add `actions/cache@v4`)
+1. **Add caching** - See [Performance: Using GitHub Actions Cache](#performance-using-github-actions-cache) section above
+2. **Add Docker Hub authentication** - Doubles rate limit from 100 to 200 requests per 6 hours (see [Authentication Setup](#-authentication-setup))
+3. **Reduce update frequency** - Run weekly instead of daily (change `cron` schedule)
 
 ### Major Version Not Updating
 
