@@ -154,22 +154,37 @@ def latest_semver(versions):
 
 
 def replace_yaml_scalar(text: str, key: str, old: str, new: str) -> tuple[str, int]:
+    """
+    Replace a YAML scalar value, handling both quoted and unquoted values.
 
-    pattern = rf'^(\s*{re.escape(key)}\s*:\s*){re.escape(old)}(.*)$'
-    
-    # Use a replacement function to avoid backreference issues with numeric values in 'new'
+    Matches patterns like:
+      - key: value
+      - key: "value"
+      - key: 'value'
+    """
+    # Try to match with optional quotes around the value
+    # Pattern: key: "old" or key: 'old' or key: old
+    pattern = rf'^(\s*{re.escape(key)}\s*:\s*)(["\']?){re.escape(old)}(["\']?)(.*)$'
+
     def replacer(match):
-        return match.group(1) + new + match.group(2)
-    
+        # Preserve the quotes that were around the old value
+        prefix = match.group(1)
+        open_quote = match.group(2)
+        close_quote = match.group(3)
+        suffix = match.group(4)
+        return f"{prefix}{open_quote}{new}{close_quote}{suffix}"
+
     new_text, count = re.subn(pattern, replacer, text, count=1, flags=re.MULTILINE)
-    
+
     if count == 0:
-        # Fallback: simple replacement if pattern-based fails
-        fallback = f"{key}: {old}"
-        if fallback in text:
-            tmp = text.replace(fallback, f"{key}: {new}", 1)
-            if tmp != text:
-                return tmp, 1
+        # Fallback: try simple replacements with different quote styles
+        for quote in ['', '"', "'"]:
+            fallback = f"{key}: {quote}{old}{quote}"
+            if fallback in text:
+                tmp = text.replace(fallback, f"{key}: {quote}{new}{quote}", 1)
+                if tmp != text:
+                    return tmp, 1
+
     return new_text, count
 
 
