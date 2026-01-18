@@ -482,13 +482,64 @@ runs:
       run: |
         set -euo pipefail
 
-        # Build Discord JSON using Python
-        python3 << 'PYEND' | curl -fsS -X POST "${DISCORD_WEBHOOK_URL}" -H 'Content-Type: application/json' -d @- || echo "Failed to send Discord notification"
+        # Build JSON payload using Python for proper escaping
+        PAYLOAD=$(python3 << 'PYTHON'
         import json, os
-        pr_url, pr_number, pr_op, pr_title, report = [os.environ.get(k, "") for k in ["PR_URL", "PR_NUMBER", "PR_OPERATION", "PR_TITLE", "RAW_REPORT"]]
-        fields = ([{"name": "🔌 PR", "value": f"[#{pr_number}]({pr_url})", "inline": True}, {"name": "⚙️ Operation", "value": pr_op, "inline": True}] if pr_url else []) + [{"name": "📝 Title", "value": pr_title}, {"name": "📋 Update Summary", "value": f"```\n{report}\n```"}]
-        print(json.dumps({"content": "📦 **Version Update Completed**", "embeds": [{"title": "Version Update", "color": 5814783, "fields": fields}]}))
-        PYEND
+
+        pr_url = os.environ.get("PR_URL", "")
+        pr_number = os.environ.get("PR_NUMBER", "")
+        pr_operation = os.environ.get("PR_OPERATION", "")
+        pr_title = os.environ.get("PR_TITLE", "")
+        report = os.environ.get("RAW_REPORT", "")
+
+        # Discord has a 1024 char limit per field value, truncate if needed
+        def truncate(text, max_len=1000):
+            if len(text) > max_len:
+                return text[:max_len] + "..."
+            return text
+
+        fields = []
+        if pr_url:
+            fields.extend([
+                {
+                    "name": "🔌 PR",
+                    "value": f"[#{pr_number}]({pr_url})",
+                    "inline": True
+                },
+                {
+                    "name": "⚙️ Operation",
+                    "value": pr_operation,
+                    "inline": True
+                }
+            ])
+
+        fields.append({
+            "name": "📝 Title",
+            "value": truncate(pr_title, 1000)
+        })
+
+        # Put report in description instead of field (4096 char limit)
+        description = f"**📋 Update Summary:**\n```\n{truncate(report, 3900)}\n```"
+
+        payload = {
+            "content": "📦 **Version Update Completed**",
+            "embeds": [
+                {
+                    "title": "Version Update",
+                    "description": description,
+                    "color": 5814783,
+                    "fields": fields
+                }
+            ]
+        }
+
+        print(json.dumps(payload))
+        PYTHON
+        )
+
+        curl -fsS -X POST "${DISCORD_WEBHOOK_URL}" \
+          -H 'Content-Type: application/json' \
+          -d "${PAYLOAD}" || echo "Failed to send Discord notification"
 
     - name: Send Microsoft Teams notification
       if: inputs.teams-webhook-url != '' && steps.check-changes.outputs.changes == 'true'
@@ -504,13 +555,58 @@ runs:
       run: |
         set -euo pipefail
 
-        # Build Teams JSON using Python
-        python3 << 'PYEND' | curl -fsS -X POST "${TEAMS_WEBHOOK_URL}" -H 'Content-Type: application/json' -d @- || echo "Failed to send Teams notification"
+        # Build JSON payload using Python for proper escaping
+        PAYLOAD=$(python3 << 'PYTHON'
         import json, os
-        pr_url, pr_number, pr_op, pr_title, report = [os.environ.get(k, "") for k in ["PR_URL", "PR_NUMBER", "PR_OPERATION", "PR_TITLE", "RAW_REPORT"]]
-        payload = {"@type": "MessageCard", "@context": "https://schema.org/extensions", "summary": "📦 Version Update Completed", "themeColor": "0078D4", "title": "📦 Version Update Completed", "sections": [{"activityTitle": pr_title, "text": f"**📋 Update Summary:**\n\n```\n{report}\n```"}]}
+
+        pr_url = os.environ.get("PR_URL", "")
+        pr_number = os.environ.get("PR_NUMBER", "")
+        pr_operation = os.environ.get("PR_OPERATION", "")
+        pr_title = os.environ.get("PR_TITLE", "")
+        report = os.environ.get("RAW_REPORT", "")
+
+        payload = {
+            "@type": "MessageCard",
+            "@context": "https://schema.org/extensions",
+            "summary": "📦 Version Update Completed",
+            "themeColor": "0078D4",
+            "title": "📦 Version Update Completed",
+            "sections": [
+                {
+                    "activityTitle": pr_title,
+                    "text": f"**📋 Update Summary:**\n\n```\n{report}\n```"
+                }
+            ]
+        }
+
         if pr_url:
-            payload["sections"][0]["facts"] = [{"name": "🔌 Pull Request:", "value": f"#{pr_number}"}, {"name": "⚙️ Operation:", "value": pr_op}]
-            payload["potentialAction"] = [{"@type": "OpenUri", "name": "View Pull Request", "targets": [{"os": "default", "uri": pr_url}]}]
+            payload["sections"][0]["facts"] = [
+                {
+                    "name": "🔌 Pull Request:",
+                    "value": f"#{pr_number}"
+                },
+                {
+                    "name": "⚙️ Operation:",
+                    "value": pr_operation
+                }
+            ]
+            payload["potentialAction"] = [
+                {
+                    "@type": "OpenUri",
+                    "name": "View Pull Request",
+                    "targets": [
+                        {
+                            "os": "default",
+                            "uri": pr_url
+                        }
+                    ]
+                }
+            ]
+
         print(json.dumps(payload))
-        PYEND
+        PYTHON
+        )
+
+        curl -fsS -X POST "${TEAMS_WEBHOOK_URL}" \
+          -H 'Content-Type: application/json' \
+          -d "${PAYLOAD}" || echo "Failed to send Microsoft Teams notification"
