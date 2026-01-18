@@ -38,7 +38,7 @@ inputs:
     default: 'chore/update-versions'
 
   pr-base:
-    description: 'Base branch for the pull request'
+    description: 'Base branch for the pull request (will be auto-detected from git if not specified)'
     required: false
     default: 'main'
 
@@ -159,6 +159,32 @@ runs:
           exit 1
         fi
 
+    - name: Detect default branch
+      id: detect-branch
+      shell: bash
+      run: |
+        # Try to detect the default branch from git
+        if git rev-parse --verify HEAD >/dev/null 2>&1; then
+          # Get the current branch name
+          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          echo "current-branch=$CURRENT_BRANCH" >> "$GITHUB_OUTPUT"
+
+          # Try to get the default branch from remote
+          DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | grep 'HEAD branch' | cut -d' ' -f5 || echo "")
+
+          # If we couldn't detect it, use the user's input or fall back to current branch
+          if [ -z "$DEFAULT_BRANCH" ]; then
+            DEFAULT_BRANCH="${{ inputs.pr-base }}"
+          fi
+
+          echo "default-branch=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Detected default branch: $DEFAULT_BRANCH"
+        else
+          # No git repository, use the input value
+          echo "default-branch=${{ inputs.pr-base }}" >> "$GITHUB_OUTPUT"
+          echo "Using configured base branch: ${{ inputs.pr-base }}"
+        fi
+
     - name: Cache registry API responses
       if: inputs.cache == 'true'
       uses: actions/cache@v5
@@ -245,7 +271,7 @@ runs:
           ---
           *This PR was automatically created by the [Container & Helm Version Updater](https://github.com/${{ github.repository }}) action.*
         branch: "chore/auto-discovery"
-        base: ${{ inputs.pr-base }}
+        base: ${{ steps.detect-branch.outputs.default-branch }}
         delete-branch: true
 
     - name: Stop if discovery PR was created
@@ -273,6 +299,16 @@ runs:
         else
           python "${{ github.action_path }}/.github/scripts/update-versions.py"
         fi
+
+    - name: Clean up cache before checking changes
+      if: steps.discovery-pr.outputs.pull-request-number == ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        # Remove cache directory before checking for changes
+        # (it shouldn't count as a change since it's temporary)
+        rm -rf .registry_cache/
+        echo "Cleaned up cache directory"
 
     - name: Check for changes
       id: check-changes
@@ -307,7 +343,7 @@ runs:
           echo "report=(No detailed update report was generated.)" >> "$GITHUB_OUTPUT"
         fi
 
-    - name: Clean up temporary files before commit
+    - name: Clean up report files before commit
       if: steps.discovery-pr.outputs.pull-request-number == ''
       shell: bash
       working-directory: ${{ inputs.working-directory }}
@@ -316,9 +352,7 @@ runs:
         rm -f .update-report.txt
         rm -f .update-config.yaml.report
         rm -f *.report
-        # Remove cache directory - it should be managed by GitHub Actions cache, not committed
-        rm -rf .registry_cache/
-        echo "Cleaned up temporary files and cache directory (not committed to PR)"
+        echo "Cleaned up report files (not committed to PR)"
 
     - name: Create Pull Request
       id: create-pr
@@ -338,7 +372,7 @@ runs:
           ---
           *This PR was automatically created by the [Container & Helm Version Updater](https://github.com/${{ github.repository }}) action.*
         branch: ${{ inputs.pr-branch }}
-        base: ${{ inputs.pr-base }}
+        base: ${{ steps.detect-branch.outputs.default-branch }}
         delete-branch: true
 
     - name: Send Telegram notification

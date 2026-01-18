@@ -175,7 +175,7 @@ See [Auto-Discovery Workflow](#auto-discovery-workflow) for a complete example.
 | `create-pr` | Create a pull request with changes | No | `true` |
 | `pr-title` | Title for the pull request | No | `chore: update Helm charts & Docker images` |
 | `pr-branch` | Branch name for the pull request | No | `chore/update-versions` |
-| `pr-base` | Base branch for the pull request | No | `main` |
+| `pr-base` | Base branch for the pull request (auto-detected if not specified) | No | Auto-detected from git |
 | `commit-message` | Commit message for changes | No | `chore: update Helm charts & Docker images` |
 | `dry-run` | Run in dry-run mode without making changes | No | `false` |
 | `python-version` | Python version to use | No | `3.12` |
