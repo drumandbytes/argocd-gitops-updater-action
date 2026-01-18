@@ -698,6 +698,7 @@ def list_ghcr_tags(repository: str) -> list[str]:
     List tags from GitHub Container Registry (ghcr.io).
 
     Uses Docker Registry HTTP API V2 with token authentication.
+    Handles pagination to fetch all tags (API returns max 100 per request).
     For public images, works without authentication.
     For private images or higher rate limits, set GITHUB_TOKEN environment variable.
 
@@ -706,7 +707,7 @@ def list_ghcr_tags(repository: str) -> list[str]:
     import os
     import base64
 
-    url = f"https://ghcr.io/v2/{repository}/tags/list"
+    base_url = f"https://ghcr.io/v2/{repository}/tags/list"
     github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
 
     headers = {}
@@ -715,17 +716,37 @@ def list_ghcr_tags(repository: str) -> list[str]:
         encoded_token = base64.b64encode(github_token.encode()).decode()
         headers["Authorization"] = f"Bearer {encoded_token}"
 
+    all_tags = []
+    url = f"{base_url}?n=1000"  # Request up to 1000 tags per page
+
     try:
-        resp = CACHE_SESSION.get(url, headers=headers, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        tags = data.get("tags", [])
-        if tags:
-            print(f"  [DEBUG] ghcr.io returned {len(tags)} tags for {repository}")
+        while url:
+            resp = CACHE_SESSION.get(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            tags = data.get("tags", [])
+            all_tags.extend(tags)
+
+            # Check for pagination link in Link header
+            link_header = resp.headers.get("Link", "")
+            if link_header and 'rel="next"' in link_header:
+                # Extract next URL from Link header
+                # Format: </v2/repo/tags/list?n=100&last=tag>; rel="next"
+                import re
+                match = re.search(r'<(/v2/[^>]+)>;\s*rel="next"', link_header)
+                if match:
+                    url = f"https://ghcr.io{match.group(1)}"
+                else:
+                    break
+            else:
+                break
+
+        if all_tags:
+            print(f"  [DEBUG] ghcr.io returned {len(all_tags)} tags total for {repository}")
             # Show a sample of tags for debugging
-            sample = tags[:5] if len(tags) <= 10 else tags[:3] + ['...'] + tags[-2:]
+            sample = all_tags[:5] if len(all_tags) <= 10 else all_tags[:3] + ['...'] + all_tags[-2:]
             print(f"  [DEBUG] Sample tags: {sample}")
-        return tags
+        return all_tags
     except Exception as e:
         print(f"  [WARN] Failed to fetch ghcr.io tags for {repository}: {e}")
         return []
