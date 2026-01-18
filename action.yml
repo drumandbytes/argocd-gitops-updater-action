@@ -102,6 +102,11 @@ inputs:
     required: false
     default: ${{ github.token }}
 
+  cache:
+    description: 'Enable registry API response caching (recommended for performance, 5-10x speedup)'
+    required: false
+    default: 'false'
+
 outputs:
   discovery-changes-detected:
     description: 'Whether auto-discovery found new resources (true/false)'
@@ -149,6 +154,20 @@ runs:
           echo "Error: dry-run must be 'true' or 'false'"
           exit 1
         fi
+        if [ "${{ inputs.cache }}" != "true" ] && [ "${{ inputs.cache }}" != "false" ]; then
+          echo "Error: cache must be 'true' or 'false'"
+          exit 1
+        fi
+
+    - name: Cache registry API responses
+      if: inputs.cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ inputs.working-directory }}/.registry_cache
+        key: registry-cache-${{ hashFiles(format('{0}/{1}', inputs.working-directory, inputs.config-path)) }}-${{ github.run_number }}
+        restore-keys: |
+          registry-cache-${{ hashFiles(format('{0}/{1}', inputs.working-directory, inputs.config-path)) }}-
+          registry-cache-
 
     - name: Setup Python
       uses: actions/setup-python@v5
@@ -288,7 +307,7 @@ runs:
           echo "report=(No detailed update report was generated.)" >> "$GITHUB_OUTPUT"
         fi
 
-    - name: Clean up report files before commit
+    - name: Clean up temporary files before commit
       if: steps.discovery-pr.outputs.pull-request-number == ''
       shell: bash
       working-directory: ${{ inputs.working-directory }}
@@ -297,7 +316,9 @@ runs:
         rm -f .update-report.txt
         rm -f .update-config.yaml.report
         rm -f *.report
-        echo "Cleaned up report files (captured but not committed)"
+        # Remove cache directory - it should be managed by GitHub Actions cache, not committed
+        rm -rf .registry_cache/
+        echo "Cleaned up temporary files and cache directory (not committed to PR)"
 
     - name: Create Pull Request
       id: create-pr

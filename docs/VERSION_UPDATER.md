@@ -10,7 +10,7 @@ Automatically update Helm chart versions and Docker image tags in your GitOps re
 ✅ **Semantic Versioning** - Only updates within the same major version
 ✅ **Major Version Detection** - Notifies when newer major versions are available
 ✅ **Ignore/Blacklist** - Exclude specific images or charts from updates
-✅ **High Performance** - Concurrent processing + caching for 7-10x speed improvement
+✅ **High Performance** - Concurrent processing + caching for 5-10x speed improvement
 ✅ **GitOps-Friendly** - Creates PRs for review before merging
 ✅ **Configurable** - Full control over what gets updated and how
 
@@ -306,7 +306,7 @@ Concurrent Processing:
   Image 3 (2s) ┘
 ```
 
-**Configuration**: Up to 10 workers process resources simultaneously, reducing total time by 7-10x for typical repositories.
+**Configuration**: Up to 10 workers process resources simultaneously, significantly reducing total processing time (actual speedup depends on registry rate limits and network conditions).
 
 ### Registry Rate Limiting
 
@@ -349,14 +349,15 @@ If rate limited (429 error), the script automatically retries with exponential b
 
 Registry API responses are cached for 6 hours using SQLite:
 
-- **First run**: Fetches all data from registries (~20s for 10 images)
-- **Cached run**: Uses local cache (~0.5s for 10 images)
+- **First run (no cache)**: ~20-30s for 10 images (mostly HTTP request time)
+- **Fully cached run**: ~2-5s for 10 images (5-10x faster, within 6-hour cache window)
+- **Partially cached run**: ~8-15s for 10 images (2-3x faster, some cache expired)
 - **Cache location**: `.registry_cache/` directory (automatically created)
 
 **Benefits**:
-- ~40x speedup for repeated runs
+- 5-10x speedup for repeated runs (when cache is fresh)
 - Reduces API rate limiting issues
-- Works offline after first run (with stale cache)
+- Works offline after first run (with stale cache fallback)
 
 ### Performance Summary Example
 
@@ -372,7 +373,7 @@ Performance Summary:
 **Typical Performance** (for 10 Docker images + 8 Helm charts):
 - First run (no cache): 15-25 seconds
 - Subsequent runs (cached): 2-5 seconds
-- **Improvement**: 7-10x faster
+- **Improvement**: 3-12x faster (typically ~5x, depending on cache hit rate)
 
 ### Cache Management
 
