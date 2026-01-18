@@ -403,85 +403,66 @@ runs:
       run: |
         set -euo pipefail
 
-        # Escape JSON strings
-        PR_TITLE_JSON=$(python3 -c "import json, os; print(json.dumps(os.environ.get('PR_TITLE', '')))")
-        PR_URL_JSON=$(python3 -c "import json, os; print(json.dumps(os.environ.get('PR_URL', '')))")
-        REPORT_JSON=$(python3 -c "import json, os; print(json.dumps(os.environ.get('RAW_REPORT', '')))")
+        # Build JSON payload using Python for proper escaping
+        PAYLOAD=$(python3 << 'PYTHON'
+        import json, os
 
-        if [ -n "$PR_URL" ]; then
-          PAYLOAD=$(cat <<EOF
-        {
-          "text": "📦 Version Update Completed",
-          "blocks": [
-            {
-              "type": "header",
-              "text": {
-                "type": "plain_text",
-                "text": "📦 Version Update Completed"
-              }
-            },
-            {
-              "type": "section",
-              "fields": [
+        pr_url = os.environ.get("PR_URL", "")
+        pr_number = os.environ.get("PR_NUMBER", "")
+        pr_operation = os.environ.get("PR_OPERATION", "")
+        pr_title = os.environ.get("PR_TITLE", "")
+        report = os.environ.get("RAW_REPORT", "")
+
+        payload = {
+            "text": "📦 Version Update Completed",
+            "blocks": [
                 {
-                  "type": "mrkdwn",
-                  "text": "*🔌 PR:*\n<${PR_URL}|#${PR_NUMBER}>"
-                },
-                {
-                  "type": "mrkdwn",
-                  "text": "*⚙️ Operation:*\n${PR_OPERATION}"
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "📦 Version Update Completed"
+                    }
                 }
-              ]
-            },
-            {
-              "type": "section",
-              "text": {
-                "type": "mrkdwn",
-                "text": "*📝 Title:*\n${PR_TITLE_JSON}"
-              }
-            },
-            {
-              "type": "section",
-              "text": {
-                "type": "mrkdwn",
-                "text": "*📋 Update Summary:*\n\`\`\`${REPORT_JSON}\`\`\`"
-              }
-            }
-          ]
+            ]
         }
-        EOF
-        )
-        else
-          PAYLOAD=$(cat <<EOF
-        {
-          "text": "📦 Version Update Completed",
-          "blocks": [
+
+        if pr_url:
+            payload["blocks"].extend([
+                {
+                    "type": "section",
+                    "fields": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*🔌 PR:*\n<{pr_url}|#{pr_number}>"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*⚙️ Operation:*\n{pr_operation}"
+                        }
+                    ]
+                }
+            ])
+
+        payload["blocks"].extend([
             {
-              "type": "header",
-              "text": {
-                "type": "plain_text",
-                "text": "📦 Version Update Completed"
-              }
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*📝 Title:*\n{pr_title}"
+                }
             },
             {
-              "type": "section",
-              "text": {
-                "type": "mrkdwn",
-                "text": "*📝 Title:*\n${PR_TITLE_JSON}"
-              }
-            },
-            {
-              "type": "section",
-              "text": {
-                "type": "mrkdwn",
-                "text": "*📋 Update Summary:*\n\`\`\`${REPORT_JSON}\`\`\`"
-              }
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*📋 Update Summary:*\n```{report}```"
+                }
             }
-          ]
-        }
-        EOF
+        ])
+
+        print(json.dumps(payload))
+        PYTHON
         )
-        fi
 
         curl -fsS -X POST "${SLACK_WEBHOOK_URL}" \
           -H 'Content-Type: application/json' \
@@ -501,71 +482,13 @@ runs:
       run: |
         set -euo pipefail
 
-        # Escape JSON strings
-        PR_TITLE_JSON=$(python3 -c "import json, os; print(json.dumps(os.environ.get('PR_TITLE', '')))")
-        REPORT_JSON=$(python3 -c "import json, os; print(json.dumps(os.environ.get('RAW_REPORT', '')))")
-
-        if [ -n "$PR_URL" ]; then
-          PAYLOAD=$(cat <<EOF
-        {
-          "content": "📦 **Version Update Completed**",
-          "embeds": [
-            {
-              "title": "Version Update",
-              "color": 5814783,
-              "fields": [
-                {
-                  "name": "🔌 PR",
-                  "value": "[#${PR_NUMBER}](${PR_URL})",
-                  "inline": true
-                },
-                {
-                  "name": "⚙️ Operation",
-                  "value": "${PR_OPERATION}",
-                  "inline": true
-                },
-                {
-                  "name": "📝 Title",
-                  "value": ${PR_TITLE_JSON}
-                },
-                {
-                  "name": "📋 Update Summary",
-                  "value": "\`\`\`\n${RAW_REPORT}\n\`\`\`"
-                }
-              ]
-            }
-          ]
-        }
-        EOF
-        )
-        else
-          PAYLOAD=$(cat <<EOF
-        {
-          "content": "📦 **Version Update Completed**",
-          "embeds": [
-            {
-              "title": "Version Update",
-              "color": 5814783,
-              "fields": [
-                {
-                  "name": "📝 Title",
-                  "value": ${PR_TITLE_JSON}
-                },
-                {
-                  "name": "📋 Update Summary",
-                  "value": "\`\`\`\n${RAW_REPORT}\n\`\`\`"
-                }
-              ]
-            }
-          ]
-        }
-        EOF
-        )
-        fi
-
-        curl -fsS -X POST "${DISCORD_WEBHOOK_URL}" \
-          -H 'Content-Type: application/json' \
-          -d "${PAYLOAD}" || echo "Failed to send Discord notification"
+        # Build Discord JSON using Python
+        python3 << 'PYEND' | curl -fsS -X POST "${DISCORD_WEBHOOK_URL}" -H 'Content-Type: application/json' -d @- || echo "Failed to send Discord notification"
+        import json, os
+        pr_url, pr_number, pr_op, pr_title, report = [os.environ.get(k, "") for k in ["PR_URL", "PR_NUMBER", "PR_OPERATION", "PR_TITLE", "RAW_REPORT"]]
+        fields = ([{"name": "🔌 PR", "value": f"[#{pr_number}]({pr_url})", "inline": True}, {"name": "⚙️ Operation", "value": pr_op, "inline": True}] if pr_url else []) + [{"name": "📝 Title", "value": pr_title}, {"name": "📋 Update Summary", "value": f"```\n{report}\n```"}]
+        print(json.dumps({"content": "📦 **Version Update Completed**", "embeds": [{"title": "Version Update", "color": 5814783, "fields": fields}]}))
+        PYEND
 
     - name: Send Microsoft Teams notification
       if: inputs.teams-webhook-url != '' && steps.check-changes.outputs.changes == 'true'
@@ -581,68 +504,13 @@ runs:
       run: |
         set -euo pipefail
 
-        # Escape JSON strings
-        PR_TITLE_JSON=$(python3 -c "import json, os; print(json.dumps(os.environ.get('PR_TITLE', '')))")
-        REPORT_JSON=$(python3 -c "import json, os; print(json.dumps(os.environ.get('RAW_REPORT', '')))")
-
-        if [ -n "$PR_URL" ]; then
-          PAYLOAD=$(cat <<EOF
-        {
-          "@type": "MessageCard",
-          "@context": "https://schema.org/extensions",
-          "summary": "📦 Version Update Completed",
-          "themeColor": "0078D4",
-          "title": "📦 Version Update Completed",
-          "sections": [
-            {
-              "activityTitle": ${PR_TITLE_JSON},
-              "facts": [
-                {
-                  "name": "🔌 Pull Request:",
-                  "value": "#${PR_NUMBER}"
-                },
-                {
-                  "name": "⚙️ Operation:",
-                  "value": "${PR_OPERATION}"
-                }
-              ],
-              "text": "**📋 Update Summary:**\n\n\`\`\`\n${RAW_REPORT}\n\`\`\`"
-            }
-          ],
-          "potentialAction": [
-            {
-              "@type": "OpenUri",
-              "name": "View Pull Request",
-              "targets": [
-                {
-                  "os": "default",
-                  "uri": "${PR_URL}"
-                }
-              ]
-            }
-          ]
-        }
-        EOF
-        )
-        else
-          PAYLOAD=$(cat <<EOF
-        {
-          "@type": "MessageCard",
-          "@context": "https://schema.org/extensions",
-          "summary": "📦 Version Update Completed",
-          "themeColor": "0078D4",
-          "title": "📦 Version Update Completed",
-          "sections": [
-            {
-              "activityTitle": ${PR_TITLE_JSON},
-              "text": "**📋 Update Summary:**\n\n\`\`\`\n${RAW_REPORT}\n\`\`\`"
-            }
-          ]
-        }
-        EOF
-        )
-        fi
-
-        curl -fsS -X POST "${TEAMS_WEBHOOK_URL}" \
-          -H 'Content-Type: application/json' \
-          -d "${PAYLOAD}" || echo "Failed to send Microsoft Teams notification"
+        # Build Teams JSON using Python
+        python3 << 'PYEND' | curl -fsS -X POST "${TEAMS_WEBHOOK_URL}" -H 'Content-Type: application/json' -d @- || echo "Failed to send Teams notification"
+        import json, os
+        pr_url, pr_number, pr_op, pr_title, report = [os.environ.get(k, "") for k in ["PR_URL", "PR_NUMBER", "PR_OPERATION", "PR_TITLE", "RAW_REPORT"]]
+        payload = {"@type": "MessageCard", "@context": "https://schema.org/extensions", "summary": "📦 Version Update Completed", "themeColor": "0078D4", "title": "📦 Version Update Completed", "sections": [{"activityTitle": pr_title, "text": f"**📋 Update Summary:**\n\n```\n{report}\n```"}]}
+        if pr_url:
+            payload["sections"][0]["facts"] = [{"name": "🔌 Pull Request:", "value": f"#{pr_number}"}, {"name": "⚙️ Operation:", "value": pr_op}]
+            payload["potentialAction"] = [{"@type": "OpenUri", "name": "View Pull Request", "targets": [{"os": "default", "uri": pr_url}]}]
+        print(json.dumps(payload))
+        PYEND
