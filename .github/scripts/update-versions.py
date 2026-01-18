@@ -741,11 +741,6 @@ def list_ghcr_tags(repository: str) -> list[str]:
             else:
                 break
 
-        if all_tags:
-            print(f"  [DEBUG] ghcr.io returned {len(all_tags)} tags total for {repository}")
-            # Show a sample of tags for debugging
-            sample = all_tags[:5] if len(all_tags) <= 10 else all_tags[:3] + ['...'] + all_tags[-2:]
-            print(f"  [DEBUG] Sample tags: {sample}")
         return all_tags
     except Exception as e:
         print(f"  [WARN] Failed to fetch ghcr.io tags for {repository}: {e}")
