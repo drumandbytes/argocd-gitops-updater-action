@@ -566,3 +566,83 @@ runs:
         curl -fsS -X POST "${DISCORD_WEBHOOK_URL}" \
           -H 'Content-Type: application/json' \
           -d "${PAYLOAD}" || echo "Failed to send Discord notification"
+
+    - name: Send Microsoft Teams notification
+      if: inputs.teams-webhook-url != '' && steps.check-changes.outputs.changes == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        TEAMS_WEBHOOK_URL: ${{ inputs.teams-webhook-url }}
+        PR_URL: ${{ steps.create-pr.outputs.pull-request-url }}
+        PR_NUMBER: ${{ steps.create-pr.outputs.pull-request-number }}
+        PR_OPERATION: ${{ steps.create-pr.outputs.pull-request-operation }}
+        PR_TITLE: ${{ inputs.pr-title }}
+        RAW_REPORT: ${{ steps.report.outputs.report }}
+      run: |
+        set -euo pipefail
+
+        # Escape JSON strings
+        PR_TITLE_JSON=$(python3 -c "import json, os; print(json.dumps(os.environ.get('PR_TITLE', '')))")
+        REPORT_JSON=$(python3 -c "import json, os; print(json.dumps(os.environ.get('RAW_REPORT', '')))")
+
+        if [ -n "$PR_URL" ]; then
+          PAYLOAD=$(cat <<EOF
+        {
+          "@type": "MessageCard",
+          "@context": "https://schema.org/extensions",
+          "summary": "📦 Version Update Completed",
+          "themeColor": "0078D4",
+          "title": "📦 Version Update Completed",
+          "sections": [
+            {
+              "activityTitle": ${PR_TITLE_JSON},
+              "facts": [
+                {
+                  "name": "🔌 Pull Request:",
+                  "value": "#${PR_NUMBER}"
+                },
+                {
+                  "name": "⚙️ Operation:",
+                  "value": "${PR_OPERATION}"
+                }
+              ],
+              "text": "**📋 Update Summary:**\n\n\`\`\`\n${RAW_REPORT}\n\`\`\`"
+            }
+          ],
+          "potentialAction": [
+            {
+              "@type": "OpenUri",
+              "name": "View Pull Request",
+              "targets": [
+                {
+                  "os": "default",
+                  "uri": "${PR_URL}"
+                }
+              ]
+            }
+          ]
+        }
+        EOF
+        )
+        else
+          PAYLOAD=$(cat <<EOF
+        {
+          "@type": "MessageCard",
+          "@context": "https://schema.org/extensions",
+          "summary": "📦 Version Update Completed",
+          "themeColor": "0078D4",
+          "title": "📦 Version Update Completed",
+          "sections": [
+            {
+              "activityTitle": ${PR_TITLE_JSON},
+              "text": "**📋 Update Summary:**\n\n\`\`\`\n${RAW_REPORT}\n\`\`\`"
+            }
+          ]
+        }
+        EOF
+        )
+        fi
+
+        curl -fsS -X POST "${TEAMS_WEBHOOK_URL}" \
+          -H 'Content-Type: application/json' \
+          -d "${PAYLOAD}" || echo "Failed to send Microsoft Teams notification"
