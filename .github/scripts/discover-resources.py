@@ -97,7 +97,7 @@ def discover_argo_apps(root: Path) -> list[dict[str, Any]]:
         except (KeyError, TypeError):
             continue
 
-    return apps
+    return sorted(apps, key=lambda x: x["name"])
 
 
 def discover_kustomize_helm_charts(root: Path) -> list[dict[str, Any]]:
@@ -378,7 +378,7 @@ def merge_configs(existing: dict, discovered: dict) -> dict:
 
             # Merge
             merged_map = {**discovered_map, **existing_map}
-            merged[section] = sorted(merged_map.values(), key=lambda x: x["name"])
+            merged[section] = sorted(merged_map.values(), key=lambda x: (x["name"], x["repoUrl"], x["file"]))
 
         elif section == "kustomizeHelmCharts":
             # Filter discovered items based on ignore rules
@@ -397,7 +397,7 @@ def merge_configs(existing: dict, discovered: dict) -> dict:
 
             # Merge
             merged_map = {**discovered_map, **existing_map}
-            merged[section] = sorted(merged_map.values(), key=lambda x: x["name"])
+            merged[section] = sorted(merged_map.values(), key=lambda x: (x["name"], x.get("repoUrl", "")))
 
         elif section == "chartDependencies":
             # Filter discovered items based on ignore rules
@@ -416,7 +416,7 @@ def merge_configs(existing: dict, discovered: dict) -> dict:
 
             # Merge
             merged_map = {**discovered_map, **existing_map}
-            merged[section] = sorted(merged_map.values(), key=lambda x: x["name"])
+            merged[section] = sorted(merged_map.values(), key=lambda x: (x["name"], x.get("repoUrl", "")))
 
         elif section == "dockerImages":
             # Filter discovered items based on ignore rules
@@ -435,7 +435,7 @@ def merge_configs(existing: dict, discovered: dict) -> dict:
 
             # Merge
             merged_map = {**discovered_map, **existing_map}
-            merged[section] = sorted(merged_map.values(), key=lambda x: x["id"])
+            merged[section] = sorted(merged_map.values(), key=lambda x: (x["id"], x["registry"], x["repository"]))
 
     # Print summary of ignored items
     total_ignored = sum(ignored_count.values())
