@@ -66,13 +66,14 @@ jobs:
     create-pr: true
 ```
 
-### With Notifications
+### With Caching and Notifications
 
 ```yaml
 - uses: drumandbytes/argocd-gitops-updater-action@v1
   with:
     config-path: '.update-config.yaml'
     create-pr: true
+    cache: true
     notification-method: slack
     slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
 ```
@@ -187,6 +188,7 @@ See [Auto-Discovery Workflow](#auto-discovery-workflow) for a complete example.
 | `dockerhub-username` | Docker Hub username (increases rate limit 100→200 req/6h) | No | - |
 | `dockerhub-token` | Docker Hub access token | No | - |
 | `github-token` | GitHub token for ghcr.io authentication | No | `${{ github.token }}` |
+| `cache` | Enable registry API response caching (7-10x speedup) | No | `false` |
 
 ## 📤 Outputs
 
@@ -288,61 +290,44 @@ See [Notification Examples](#-notification-examples) section below for detailed 
       });
 ```
 
-### Performance: Using GitHub Actions Cache
+### Performance: Enable Built-in Caching
 
-**Highly Recommended!** Add caching to persist registry API responses between workflow runs (7-10x speedup, 40x for fully cached runs):
+**Highly Recommended!** Enable built-in caching to persist registry API responses between workflow runs (7-10x speedup, 40x for fully cached runs):
 
 ```yaml
-steps:
-  - name: Checkout repository
-    uses: actions/checkout@v4
-
-  # This step RESTORES .registry_cache/ from previous workflow runs
-  - name: Cache registry API responses
-    uses: actions/cache@v4
-    with:
-      path: .registry_cache
-      key: registry-cache-${{ hashFiles('.update-config.yaml') }}-${{ github.run_number }}
-      restore-keys: |
-        registry-cache-${{ hashFiles('.update-config.yaml') }}-
-        registry-cache-
-
-  # This step uses the restored cache and updates it with new API responses
-  - name: Update versions
-    uses: drumandbytes/argocd-gitops-updater-action@v1
-    with:
-      config-path: '.update-config.yaml'
-      create-pr: true
-
-  # GitHub Actions automatically SAVES .registry_cache/ at the end of the workflow
+- uses: drumandbytes/argocd-gitops-updater-action@v1
+  with:
+    config-path: '.update-config.yaml'
+    create-pr: true
+    cache: true  # Enable caching for 7-10x performance improvement
 ```
+
+That's it! Just add `cache: true` and the action handles everything automatically.
 
 **How it works:**
 
-1. **Cache step (RESTORE):** `actions/cache@v4` restores `.registry_cache/` directory from a previous workflow run (if it exists)
-2. **Action runs:** The updater script reads cached API responses from `.registry_cache/` and writes new responses to the same directory
-3. **Automatic cleanup:** The action automatically removes `.registry_cache/` before creating PRs (it's never committed to your repository)
-4. **Automatic save (POST-RUN):** GitHub Actions automatically saves the `.registry_cache/` directory when the workflow completes for use in future runs
+1. **Cache restore:** When enabled, the action automatically restores `.registry_cache/` from previous workflow runs
+2. **Action runs:** The updater script reads cached API responses and writes new responses to `.registry_cache/`
+3. **Automatic cleanup:** The cache directory is automatically removed before creating PRs (never committed to your repository)
+4. **Cache save:** GitHub Actions automatically saves the cache when the workflow completes
 
-**Important notes:**
-- ⚠️ **You must add the cache step above** to your workflow - it's not automatic!
-- ✅ The cache is **never committed** to your repository (automatically cleaned up before PR creation)
-- ✅ With the cache step: Cache persists for up to 7 days between workflow runs in GitHub's cache storage
-- ✅ Without the cache step: Cache is lost after each run (but action still works, just slower)
-
-**Cache persistence:**
-- **Without GitHub Actions cache:** `.registry_cache/` is lost after each workflow run (ephemeral runners)
-- **With GitHub Actions cache:** `.registry_cache/` persists between runs for up to 7 days in GitHub's cache storage
-- **Cache key strategy:**
-  - Primary key includes config file hash and run number (unique per run)
-  - Restore-keys allow using previous cache even if config changed or from earlier runs
+**Cache behavior:**
+- **With `cache: true`:** Cache persists for up to 7 days between workflow runs in GitHub's cache storage
+- **With `cache: false` (default):** Cache is lost after each workflow run (but action still works, just slower)
+- **Cache key strategy:** Based on config file hash and run number for optimal cache hits
 - **Script-level caching:** The Python script caches HTTP responses for 6 hours using SQLite
 
 **Performance benefits:**
-- **First run:** Normal speed (no cache, ~20-30s for 10 images)
-- **Second run (same day):** 40x faster (~0.5s, fully cached within 6-hour window)
-- **Second run (next day):** 7-10x faster (~3-5s, partial cache after 6-hour expiration)
+- **First run (no cache):** Normal speed (~20-30s for 10 images)
+- **Cached run (same day):** 40x faster (~0.5s, fully cached within 6-hour window)
+- **Cached run (next day):** 7-10x faster (~3-5s, partial cache after 6-hour expiration)
 - **Rate limit protection:** Dramatically fewer API calls to Docker Hub and other registries
+
+**Important notes:**
+- ✅ Cache is managed entirely by the action - no manual setup needed
+- ✅ Cache is never committed to your repository (automatically cleaned up)
+- ✅ No breaking changes - cache defaults to `false` for backward compatibility
+- ✅ Free and built into GitHub Actions (no external services needed)
 
 ## 🔐 Authentication Setup
 
