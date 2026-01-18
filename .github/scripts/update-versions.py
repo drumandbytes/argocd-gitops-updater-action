@@ -290,6 +290,61 @@ def update_kustomize_helm_chart(file_path: Path, chart_name: str, latest_version
     return True, target_current, latest_version
 
 
+def update_chart_yaml(file_path: Path, chart_name: str, latest_version: str, dry_run: bool):
+    """
+    Update dependencies[].version for a given chart in a Chart.yaml file
+    using text-level replacement. Returns (changed, old, new) for the first change.
+    """
+    data = load_yaml(file_path)
+
+    dependencies = data.get("dependencies")
+    if not isinstance(dependencies, list):
+        print(f"  [WARN] {file_path} has no dependencies list, skipping")
+        return False, None, None
+
+    target_current = None
+
+    for dep in dependencies:
+        if dep.get("name") != chart_name:
+            continue
+        current = str(dep.get("version", ""))
+        if not current:
+            print(f"  [WARN] {file_path} dependencies entry for {chart_name} has no version")
+            continue
+
+        print(f"  {file_path} ({chart_name}): current={current}, latest={latest_version}")
+        try:
+            if Version(latest_version) <= Version(current):
+                print("  -> up to date")
+                continue
+        except InvalidVersion:
+            print("  [WARN] Non-semver version in file, skipping semver comparison")
+            if current == latest_version:
+                continue
+
+        target_current = current
+        break
+
+    if not target_current:
+        return False, None, None
+
+    print("  -> updating version")
+
+    if dry_run:
+        return True, target_current, latest_version
+
+    # Thread-safe file write
+    with FILE_WRITE_LOCK:
+        text = file_path.read_text()
+        new_text, count = replace_yaml_scalar(text, "version", target_current, latest_version)
+        if count == 0:
+            print(f"  [WARN] Could not find 'version: {target_current}' in {file_path} for chart {chart_name}")
+            return False, None, None
+        file_path.write_text(new_text)
+
+    return True, target_current, latest_version
+
+
 def process_argo_app(app, ignore_config, dry_run):
     """Process a single Argo CD app. Returns (changed_files, helm_changes, errors)."""
     changed_files = set()
@@ -380,16 +435,60 @@ def process_kustomize_chart(entry, ignore_config, dry_run):
     return changed_files, helm_changes, None
 
 
+def process_chart_dependency(entry, ignore_config, dry_run):
+    """Process a single Chart.yaml dependency. Returns (changed_files, helm_changes, errors)."""
+    changed_files = set()
+    helm_changes = []
+
+    name = entry["name"]
+    repo_url = entry["repoUrl"]
+
+    print(f"\n[CHART.YAML] {name}")
+
+    try:
+        # Check if chart is ignored
+        ignored, reason = should_ignore_helm_chart(name, "", ignore_config)
+        if ignored:
+            print(f"  [SKIP] {reason}")
+            return changed_files, helm_changes, None
+
+        latest = get_latest_helm_chart_version(repo_url, name)
+        if not latest:
+            print(f"  [WARN] No valid versions found in {repo_url} for {name}")
+            return changed_files, helm_changes, None
+
+        for f in entry.get("files", []):
+            file_path = Path(f)
+            changed, old, new = update_chart_yaml(file_path, name, latest, dry_run)
+            if changed:
+                changed_files.add(str(file_path))
+                helm_changes.append(
+                    {
+                        "kind": "chartDependency",
+                        "name": name,
+                        "file": str(file_path),
+                        "from": old,
+                        "to": new,
+                    }
+                )
+    except Exception as e:
+        return changed_files, helm_changes, f"Failed to process {name}: {e}"
+
+    return changed_files, helm_changes, None
+
+
 def update_helm_charts(config, ignore_config, dry_run: bool):
     changed_files = set()
     helm_changes = []  # list of dicts: {type, name, file, from, to}
 
     argo_apps = config.get("argoApps", [])
     kustomize_charts = config.get("kustomizeHelmCharts", [])
+    chart_dependencies = config.get("chartDependencies", [])
 
     all_tasks = []
     all_tasks.extend([("argo", app) for app in argo_apps])
     all_tasks.extend([("kustomize", chart) for chart in kustomize_charts])
+    all_tasks.extend([("chartDep", dep) for dep in chart_dependencies])
 
     if not all_tasks:
         return changed_files, helm_changes
@@ -402,8 +501,10 @@ def update_helm_charts(config, ignore_config, dry_run: bool):
         for task_type, item in all_tasks:
             if task_type == "argo":
                 future = executor.submit(process_argo_app, item, ignore_config, dry_run)
-            else:
+            elif task_type == "kustomize":
                 future = executor.submit(process_kustomize_chart, item, ignore_config, dry_run)
+            else:  # chartDep
+                future = executor.submit(process_chart_dependency, item, ignore_config, dry_run)
             futures.append(future)
 
         # Collect results as they complete
@@ -988,7 +1089,7 @@ def main():
     total_duration = time.time() - start_time
     print(f"\n{'='*60}")
     print(f"Performance Summary:")
-    print(f"  Helm charts: {helm_duration:.2f}s ({len(config.get('argoApps', [])) + len(config.get('kustomizeHelmCharts', []))} charts)")
+    print(f"  Helm charts: {helm_duration:.2f}s ({len(config.get('argoApps', [])) + len(config.get('kustomizeHelmCharts', [])) + len(config.get('chartDependencies', []))} charts)")
     print(f"  Docker images: {docker_duration:.2f}s ({len(config.get('dockerImages', []))} images)")
     print(f"  Total time: {total_duration:.2f}s")
     print(f"{'='*60}")
