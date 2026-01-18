@@ -300,23 +300,14 @@ runs:
           python "${{ github.action_path }}/.github/scripts/update-versions.py"
         fi
 
-    - name: Clean up cache before checking changes
-      if: steps.discovery-pr.outputs.pull-request-number == ''
-      shell: bash
-      working-directory: ${{ inputs.working-directory }}
-      run: |
-        # Remove cache directory before checking for changes
-        # (it shouldn't count as a change since it's temporary)
-        rm -rf .registry_cache/
-        echo "Cleaned up cache directory"
-
     - name: Check for changes
       id: check-changes
       if: steps.discovery-pr.outputs.pull-request-number == ''
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        if git diff --quiet; then
+        # Check for changes, but exclude .registry_cache (it's ephemeral and in .gitignore)
+        if git diff --quiet -- . ':!.registry_cache'; then
           echo "changes=false" >> $GITHUB_OUTPUT
           echo "No changes detected"
         else
