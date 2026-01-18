@@ -313,10 +313,7 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        # Remove cache directory so it doesn't trigger false positive change detection
-        # (it's already been saved to GitHub Actions cache in the previous step)
         rm -rf .registry_cache/
-        echo "Cleaned up cache directory (already saved to GitHub Actions cache)"
 
     - name: Check for changes
       id: check-changes
