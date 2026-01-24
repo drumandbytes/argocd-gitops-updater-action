@@ -28,6 +28,13 @@ CACHE_BACKEND = CacheBackend(
 # Async lock for file writes
 FILE_WRITE_LOCK = asyncio.Lock()
 
+# Helm chart concurrency limit to avoid overwhelming DNS and network
+# Conservative limit since Helm repositories can be slow
+HELM_CONCURRENCY_LIMIT = 5
+
+# Helm chart semaphore for rate limiting (will be initialized in main)
+HELM_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
 # Per-registry concurrency limits to avoid rate limiting
 # These limits are conservative to stay well below API rate limits
 REGISTRY_LIMITS = {
@@ -272,9 +279,24 @@ async def get_latest_helm_chart_version(session: CachedSession, repo_url: str, c
     """Get the latest Helm chart version from a repository."""
     index_url = repo_url.rstrip("/") + "/index.yaml"
 
-    async with session.get(index_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-        resp.raise_for_status()
-        content = await resp.text()
+    # Use semaphore to limit concurrent Helm chart requests
+    async with HELM_SEMAPHORE:
+        # Retry logic for transient network errors
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with session.get(index_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    resp.raise_for_status()
+                    content = await resp.text()
+                break
+            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    print(f"  [WARN] Helm chart request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}")
+                    await asyncio.sleep(wait_time)
+                else:
+                    print(f"  [ERROR] Helm chart request failed after {max_retries} attempts: {e}")
+                    raise
 
     index = yaml.safe_load(content)
     entries = index.get("entries", {}).get(chart_name, [])
@@ -1215,7 +1237,12 @@ async def async_main():
     ignore_config = config.get("ignore")
 
     # Initialize registry-specific semaphores
-    global REGISTRY_SEMAPHORES
+    global REGISTRY_SEMAPHORES, HELM_SEMAPHORE
+
+    # Initialize Helm chart semaphore for concurrency control
+    HELM_SEMAPHORE = asyncio.Semaphore(HELM_CONCURRENCY_LIMIT)
+
+    # Initialize Docker registry semaphores
     REGISTRY_SEMAPHORES = {
         registry: asyncio.Semaphore(limit)
         for registry, limit in REGISTRY_LIMITS.items()
@@ -1248,8 +1275,13 @@ async def async_main():
 
     changed_files = set()
 
-    # Create cached session
-    async with CachedSession(cache=CACHE_BACKEND) as session:
+    # Create cached session with connection limits to avoid overwhelming network
+    connector = aiohttp.TCPConnector(
+        limit=30,  # Total concurrent connections
+        limit_per_host=10,  # Max concurrent connections per host
+        ttl_dns_cache=300  # Cache DNS for 5 minutes
+    )
+    async with CachedSession(cache=CACHE_BACKEND, connector=connector) as session:
         print(f"Cache initialized: SQLite backend at .registry_cache/")
 
         # Update Helm charts
