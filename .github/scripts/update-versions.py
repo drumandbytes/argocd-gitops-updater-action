@@ -161,7 +161,11 @@ def should_ignore_docker_image(entry: dict, tag: str, ignore_config: Optional[di
     for ignore_rule in docker_ignores:
         # Check by ID
         if "id" in ignore_rule and ignore_rule["id"] == entry.get("id"):
-            return True, f"ignored by ID: {ignore_rule['id']}"
+            # If there's a versionPattern, don't skip the image entirely
+            # The pattern will be used to filter out specific versions during tag selection
+            if "versionPattern" not in ignore_rule:
+                # No version pattern means ignore all versions of this image
+                return True, f"ignored by ID: {ignore_rule['id']}"
 
         # Check by repository
         if "repository" in ignore_rule and ignore_rule["repository"] == entry.get("repository"):
@@ -1020,7 +1024,7 @@ async def list_registry_tags(session: CachedSession, registry: str, repository: 
             return []
 
 
-async def find_best_tags_for_same_major(session: CachedSession, registry: str, repository: str, current_tag: str, semaphore: Optional[asyncio.Semaphore] = None) -> Tuple[Optional[str], Optional[Version], Optional[str], Optional[Version]]:
+async def find_best_tags_for_same_major(session: CachedSession, registry: str, repository: str, current_tag: str, semaphore: Optional[asyncio.Semaphore] = None, entry: Optional[dict] = None, ignore_config: Optional[dict] = None) -> Tuple[Optional[str], Optional[Version], Optional[str], Optional[Version]]:
     """
     Find the best tags for the same major version.
 
@@ -1030,6 +1034,8 @@ async def find_best_tags_for_same_major(session: CachedSession, registry: str, r
         repository: The repository path
         current_tag: The current tag to compare against
         semaphore: Optional semaphore for rate limiting
+        entry: Docker image entry (for ignore pattern matching)
+        ignore_config: Ignore configuration (for version pattern filtering)
 
     Returns:
         Tuple of (best_same_tag, best_same_ver, best_any_tag, best_any_ver)
@@ -1054,6 +1060,20 @@ async def find_best_tags_for_same_major(session: CachedSession, registry: str, r
     if not tags:
         print(f"  [WARN] No tags found in registry {registry} for repo {repository}")
         return None, None, None, None
+
+    # Filter tags based on versionPattern in ignore rules
+    if entry and ignore_config:
+        docker_ignores = ignore_config.get("dockerImages", [])
+        for ignore_rule in docker_ignores:
+            if "id" in ignore_rule and ignore_rule["id"] == entry.get("id"):
+                if "versionPattern" in ignore_rule:
+                    version_pattern = ignore_rule["versionPattern"]
+                    original_count = len(tags)
+                    tags = [t for t in tags if not re.match(version_pattern, t)]
+                    filtered_count = original_count - len(tags)
+                    if filtered_count > 0:
+                        print(f"  [INFO] Filtered out {filtered_count} tags matching versionPattern: {version_pattern}")
+                break
 
     same_major: List[Tuple[Version, str]] = []
     all_versions: List[Tuple[Version, str]] = []
@@ -1138,7 +1158,7 @@ async def update_single_docker_image(session: CachedSession, entry: dict, ignore
         semaphore = REGISTRY_SEMAPHORES.get(registry)
 
         best_same_tag, best_same_ver, best_any_tag, best_any_ver = await find_best_tags_for_same_major(
-            session, registry, repository, current_tag, semaphore
+            session, registry, repository, current_tag, semaphore, entry, ignore_config
         )
 
         current_ver = parse_semver_from_tag(current_tag)
@@ -1302,7 +1322,7 @@ async def async_main():
     if cache_dir.exists():
         # Check if this is an old/incompatible cache by looking for a marker file
         cache_version_file = cache_dir / ".cache_version"
-        expected_version = "v3_test_default_params"
+        expected_version = "v4_with_version_pattern_fix"
 
         if not cache_version_file.exists() or cache_version_file.read_text().strip() != expected_version:
             print("Detected incompatible cache format, clearing...")
