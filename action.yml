@@ -218,7 +218,18 @@ runs:
     - name: Install uv
       uses: astral-sh/setup-uv@v7
       with:
-        enable-cache: ${{ inputs.cache-python == 'true' }}
+        enable-cache: false
+
+    - name: Restore Python dependency cache
+      id: cache-python-restore
+      if: inputs.cache-python == 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/uv
+        key: python-deps-${{ runner.os }}-${{ inputs.python-version }}-${{ hashFiles(format('{0}/pyproject.toml', github.action_path)) }}-${{ inputs.cache-key-suffix }}
+        restore-keys: |
+          python-deps-${{ runner.os }}-${{ inputs.python-version }}-${{ hashFiles(format('{0}/pyproject.toml', github.action_path)) }}-
+          python-deps-${{ runner.os }}-${{ inputs.python-version }}-
 
     - name: Install dependencies
       shell: bash
@@ -321,6 +332,13 @@ runs:
       with:
         path: ${{ inputs.working-directory }}/.registry_cache
         key: registry-cache-${{ hashFiles(format('{0}/{1}', inputs.working-directory, inputs.config-path)) }}-${{ inputs.cache-key-suffix }}-${{ github.run_number }}
+
+    - name: Save Python dependency cache
+      if: inputs.cache-python == 'true' && steps.discovery-pr.outputs.pull-request-number == '' && steps.cache-python-restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/uv
+        key: python-deps-${{ runner.os }}-${{ inputs.python-version }}-${{ hashFiles(format('{0}/pyproject.toml', github.action_path)) }}-${{ inputs.cache-key-suffix }}
 
     - name: Clean up cache before checking changes
       if: steps.discovery-pr.outputs.pull-request-number == ''
