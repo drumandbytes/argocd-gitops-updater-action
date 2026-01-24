@@ -188,7 +188,7 @@ runs:
     - name: Restore registry cache
       id: cache-restore
       if: inputs.cache == 'true'
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v5
       with:
         path: ${{ inputs.working-directory }}/.registry_cache
         key: registry-cache-${{ hashFiles(format('{0}/{1}', inputs.working-directory, inputs.config-path)) }}-${{ github.run_number }}
@@ -303,7 +303,7 @@ runs:
 
     - name: Save registry cache
       if: inputs.cache == 'true' && steps.discovery-pr.outputs.pull-request-number == ''
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v5
       with:
         path: ${{ inputs.working-directory }}/.registry_cache
         key: registry-cache-${{ hashFiles(format('{0}/{1}', inputs.working-directory, inputs.config-path)) }}-${{ github.run_number }}
