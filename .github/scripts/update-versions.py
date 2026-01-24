@@ -1215,8 +1215,9 @@ def main():
 
     # Check Docker Hub authentication and adjust limits
     import os
-    dockerhub_authenticated = bool(os.environ.get("DOCKERHUB_USERNAME") and
-                                   (os.environ.get("DOCKERHUB_TOKEN") or os.environ.get("DOCKERHUB_PASSWORD")))
+    dockerhub_username = os.environ.get("DOCKERHUB_USERNAME", "").strip()
+    dockerhub_token = os.environ.get("DOCKERHUB_TOKEN", "").strip() or os.environ.get("DOCKERHUB_PASSWORD", "").strip()
+    dockerhub_authenticated = bool(dockerhub_username and dockerhub_token)
 
     if dockerhub_authenticated:
         print("Docker Hub: Authenticated (200 req/6h rate limit)")

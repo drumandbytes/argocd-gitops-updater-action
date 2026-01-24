@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Update Helm charts and Docker images
         uses: drumandbytes/argocd-gitops-updater-action@v1
@@ -39,4 +39,3 @@ jobs:
           dry-run: ${{ github.event.inputs.dry-run || false }}
           # Optional: Enable caching for better performance
           # cache: true
-          # cache-python: true

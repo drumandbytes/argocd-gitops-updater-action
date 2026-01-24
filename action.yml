@@ -38,7 +38,7 @@ inputs:
     default: 'chore/update-versions'
 
   pr-base:
-    description: 'Base branch for the pull request (will be auto-detected from git if not specified)'
+    description: 'Base branch for the pull request'
     required: false
     default: 'main'
 
@@ -107,16 +107,6 @@ inputs:
     required: false
     default: 'false'
 
-  cache-python:
-    description: 'Enable Python dependency caching (pip/uv). Speeds up setup by 3-4x on subsequent runs. Uses GitHub Actions cache storage.'
-    required: false
-    default: 'false'
-
-  cache-key-suffix:
-    description: 'Optional suffix for cache keys. Use to manually invalidate cache (e.g., "v2", "2024-01-15"). Applies to both registry and Python caches.'
-    required: false
-    default: ''
-
 outputs:
   discovery-changes-detected:
     description: 'Whether auto-discovery found new resources (true/false)'
@@ -168,72 +158,27 @@ runs:
           echo "Error: cache must be 'true' or 'false'"
           exit 1
         fi
-        if [ "${{ inputs.cache-python }}" != "true" ] && [ "${{ inputs.cache-python }}" != "false" ]; then
-          echo "Error: cache-python must be 'true' or 'false'"
-          exit 1
-        fi
-
-    - name: Detect default branch
-      id: detect-branch
-      shell: bash
-      run: |
-        # Try to detect the default branch from git
-        if git rev-parse --verify HEAD >/dev/null 2>&1; then
-          # Get the current branch name
-          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-          echo "current-branch=$CURRENT_BRANCH" >> "$GITHUB_OUTPUT"
-
-          # Try to get the default branch from remote
-          DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | grep 'HEAD branch' | cut -d' ' -f5 || echo "")
-
-          # If we couldn't detect it, use the user's input or fall back to current branch
-          if [ -z "$DEFAULT_BRANCH" ]; then
-            DEFAULT_BRANCH="${{ inputs.pr-base }}"
-          fi
-
-          echo "default-branch=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
-          echo "Detected default branch: $DEFAULT_BRANCH"
-        else
-          # No git repository, use the input value
-          echo "default-branch=${{ inputs.pr-base }}" >> "$GITHUB_OUTPUT"
-          echo "Using configured base branch: ${{ inputs.pr-base }}"
-        fi
 
     - name: Restore registry cache
       id: cache-restore
       if: inputs.cache == 'true'
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v5
       with:
         path: ${{ inputs.working-directory }}/.registry_cache
-        key: registry-cache-${{ hashFiles(format('{0}/{1}', inputs.working-directory, inputs.config-path)) }}-${{ inputs.cache-key-suffix }}-${{ github.run_number }}
+        key: registry-cache-${{ hashFiles(format('{0}/{1}', inputs.working-directory, inputs.config-path)) }}-${{ github.run_number }}
         restore-keys: |
-          registry-cache-${{ hashFiles(format('{0}/{1}', inputs.working-directory, inputs.config-path)) }}-${{ inputs.cache-key-suffix }}-
+          registry-cache-${{ hashFiles(format('{0}/{1}', inputs.working-directory, inputs.config-path)) }}-
           registry-cache-
 
     - name: Setup Python
       uses: actions/setup-python@v6
       with:
         python-version: ${{ inputs.python-version }}
-        cache: ${{ inputs.cache-python == 'true' && 'pip' || '' }}
-
-    - name: Install uv
-      uses: astral-sh/setup-uv@v7
-      with:
-        enable-cache: ${{ inputs.cache-python == 'true' }}
 
     - name: Install dependencies
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
       run: |
-        # Check if pyproject.toml exists in the action directory
-        ACTION_DIR="${{ github.action_path }}"
-        if [ -f "${ACTION_DIR}/pyproject.toml" ]; then
-          echo "Installing dependencies from action pyproject.toml..."
-          uv pip install --system -r <(uv pip compile "${ACTION_DIR}/pyproject.toml")
-        else
-          echo "Installing required dependencies directly..."
-          uv pip install --system requests pyyaml packaging
-        fi
+        pip install requests requests-cache pyyaml packaging
 
     - name: Auto-discover resources
       if: inputs.auto-discover == 'true'
@@ -287,7 +232,7 @@ runs:
           ---
           *This PR was automatically created by the [Container & Helm Version Updater](https://github.com/${{ github.repository }}) action.*
         branch: "chore/auto-discovery"
-        base: ${{ steps.detect-branch.outputs.default-branch }}
+        base: ${{ inputs.pr-base }}
         delete-branch: true
 
     - name: Stop if discovery PR was created
@@ -318,17 +263,10 @@ runs:
 
     - name: Save registry cache
       if: inputs.cache == 'true' && steps.discovery-pr.outputs.pull-request-number == ''
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v5
       with:
         path: ${{ inputs.working-directory }}/.registry_cache
-        key: registry-cache-${{ hashFiles(format('{0}/{1}', inputs.working-directory, inputs.config-path)) }}-${{ inputs.cache-key-suffix }}-${{ github.run_number }}
-
-    - name: Clean up cache before checking changes
-      if: steps.discovery-pr.outputs.pull-request-number == ''
-      shell: bash
-      working-directory: ${{ inputs.working-directory }}
-      run: |
-        rm -rf .registry_cache/
+        key: registry-cache-${{ hashFiles(format('{0}/{1}', inputs.working-directory, inputs.config-path)) }}-${{ github.run_number }}
 
     - name: Check for changes
       id: check-changes
@@ -336,7 +274,8 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        if git diff --quiet; then
+        # Exclude cache and report files from diff
+        if git diff --quiet -- . ':(exclude).registry_cache' ':(exclude).update-report.txt'; then
           echo "changes=false" >> $GITHUB_OUTPUT
           echo "No changes detected"
         else
@@ -350,29 +289,22 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        REPORT_FILE="${{ inputs.config-path }}.report"
         if [ -f ".update-report.txt" ]; then
           {
             echo 'report<<EOF'
             cat .update-report.txt
             echo EOF
           } >> "$GITHUB_OUTPUT"
-          # Also save to a file for later use
-          cp .update-report.txt "$REPORT_FILE"
         else
           echo "report=(No detailed update report was generated.)" >> "$GITHUB_OUTPUT"
         fi
 
-    - name: Clean up report files before commit
+    - name: Clean up temporary files
       if: steps.discovery-pr.outputs.pull-request-number == ''
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        # Remove report files so they don't get committed to the PR
-        rm -f .update-report.txt
-        rm -f .update-config.yaml.report
-        rm -f *.report
-        echo "Cleaned up report files (not committed to PR)"
+        rm -rf .registry_cache .update-report.txt
 
     - name: Create Pull Request
       id: create-pr
@@ -392,7 +324,7 @@ runs:
           ---
           *This PR was automatically created by the [Container & Helm Version Updater](https://github.com/${{ github.repository }}) action.*
         branch: ${{ inputs.pr-branch }}
-        base: ${{ steps.detect-branch.outputs.default-branch }}
+        base: ${{ inputs.pr-base }}
         delete-branch: true
 
     - name: Send Telegram notification

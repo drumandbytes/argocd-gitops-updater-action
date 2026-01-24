@@ -37,7 +37,7 @@ jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: drumandbytes/argocd-gitops-updater-action@v1
         with:
@@ -73,8 +73,7 @@ jobs:
   with:
     config-path: '.update-config.yaml'
     create-pr: true
-    cache: true              # Enable registry API caching (2-3x faster)
-    cache-python: true       # Enable Python dependency caching (3-4x faster setup)
+    cache: true              # Enable registry API caching
 ```
 
 ### With Notifications
@@ -185,7 +184,7 @@ See [Auto-Discovery Workflow](#auto-discovery-workflow) for a complete example.
 | `create-pr` | Create a pull request with changes | No | `true` |
 | `pr-title` | Title for the pull request | No | `chore: update Helm charts & Docker images` |
 | `pr-branch` | Branch name for the pull request | No | `chore/update-versions` |
-| `pr-base` | Base branch for the pull request (auto-detected if not specified) | No | Auto-detected from git |
+| `pr-base` | Base branch for the pull request | No | `main` |
 | `commit-message` | Commit message for changes | No | `chore: update Helm charts & Docker images` |
 | `dry-run` | Run in dry-run mode without making changes | No | `false` |
 | `python-version` | Python version to use | No | `3.12` |
@@ -198,9 +197,7 @@ See [Auto-Discovery Workflow](#auto-discovery-workflow) for a complete example.
 | `dockerhub-username` | Docker Hub username (increases rate limit 100→200 req/6h) | No | - |
 | `dockerhub-token` | Docker Hub access token | No | - |
 | `github-token` | GitHub token for ghcr.io authentication | No | `${{ github.token }}` |
-| `cache` | Enable registry API response caching (2-3x speedup, ~10-50 MB storage) | No | `false` |
-| `cache-python` | Enable Python dependency caching (3-4x setup speedup, ~50-100 MB storage) | No | `false` |
-| `cache-key-suffix` | Optional suffix for cache keys to manually invalidate cache (e.g., `v2`) | No | `''` |
+| `cache` | Enable registry API response caching (~10-50 MB storage) | No | `false` |
 
 ## 📤 Outputs
 
@@ -230,7 +227,7 @@ jobs:
   discover:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: drumandbytes/argocd-gitops-updater-action@v1
         with:
@@ -374,65 +371,29 @@ The action automatically uses `${{ github.token }}` for ghcr.io authentication. 
 
 ### Caching for Performance
 
-This action supports **two types of caching** (both opt-in):
-
-| Cache Type | What It Stores | Speedup | Storage Used | Default |
-|------------|----------------|---------|--------------|---------|
-| **Registry Cache** | Docker Hub, GHCR API responses (tag lists) | 2-3x | ~10-50 MB | ❌ Disabled |
-| **Python Cache** | pip/uv dependencies | 3-4x setup speedup | ~50-100 MB | ❌ Disabled |
-
-#### Expected Performance
-
-| Scenario | Without Cache | With Registry Cache | With All Caches |
-|----------|---------------|---------------------|-----------------|
-| **Small repo** (5-10 images) | ~60s | ~30s | ~15-20s |
-| **Medium repo** (20-50 images) | ~90s | ~40s | ~20-25s |
-| **Large repo** (100+ images) | ~180s | ~90s | ~40-50s |
-
-> **Note**: First run builds the cache, so you'll see the speedup on subsequent runs.
-
-#### Enable Caching (Recommended)
+Enable registry API response caching to reduce network requests and improve performance:
 
 ```yaml
 - uses: drumandbytes/argocd-gitops-updater-action@v1
   with:
     config-path: '.update-config.yaml'
-    cache: true              # Enable registry API caching (recommended)
-    cache-python: true       # Enable Python dependency caching (recommended)
+    cache: true              # Enable registry API caching (opt-in)
 ```
 
-#### When to Disable Caching
+**Benefits:**
+- Caches Docker Hub, GHCR, and other registry API responses (tag lists)
+- Reduces redundant network calls within the 6-hour cache lifetime
+- Storage: ~10-50 MB (negligible)
+- Default: Disabled (opt-in to respect cache storage limits)
 
-**Disable registry cache** when:
-- Testing/debugging version detection issues
-- Need to force fresh tag lookups from registries
-- Troubleshooting "latest version not detected" problems
+**Performance Impact:**
+- Most workflows see minimal improvement from caching (a few seconds)
+- Best for workflows that run multiple times within 6 hours
+- Daily/weekly scheduled workflows may see limited benefit (cache expires)
 
+**When to Disable:**
 ```yaml
-cache: false              # Force fresh API calls
-cache-python: true        # Keep Python cache (usually safe)
-```
-
-**Disable Python cache** when:
-- Experiencing dependency installation errors
-- Python version was changed
-- Need to troubleshoot pip/uv issues
-
-```yaml
-cache: true               # Keep registry cache
-cache-python: false       # Force fresh pip install
-```
-
-#### Manual Cache Invalidation
-
-Use `cache-key-suffix` to manually bust the cache:
-
-```yaml
-- uses: drumandbytes/argocd-gitops-updater-action@v1
-  with:
-    cache: true
-    cache-python: true
-    cache-key-suffix: 'v2'  # Change this to invalidate cache
+cache: false  # Use when testing/debugging version detection
 ```
 
 ### Registry Rate Limits
@@ -452,7 +413,6 @@ Use `cache-key-suffix` to manually bust the cache:
 - **Concurrent Processing**: Up to 10 parallel workers for image updates
 - **Smart Rate Limiting**: Per-registry semaphores prevent API throttling
 - **GitHub Actions Cache**: Persistent cache between workflow runs (opt-in)
-- **Python Dependency Caching**: Fast setup with pip/uv caching (opt-in)
 
 ## 🎯 Supported Registries
 
