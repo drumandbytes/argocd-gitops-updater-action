@@ -19,11 +19,11 @@ REPORT_PATH = Path(".update-report.txt")
 # Initialize async cached session for API calls (expires after 6 hours)
 # Cache directory will be created in .registry_cache/
 # Using SQLite backend for async concurrent access
+# NOTE: Removed include_headers parameter as it may not be valid/working
 CACHE_BACKEND = CacheBackend(
     cache_name='.registry_cache/aiohttp_cache',
     expire_after=21600,  # 6 hours
     allowed_methods=['GET'],
-    include_headers=False,  # Don't include headers in cache key (fixes auth caching)
 )
 
 # Async lock for file writes
@@ -1392,6 +1392,18 @@ async def async_main():
 
         changed_files |= helm_changed_files
         changed_files |= docker_changed_files
+
+    # Diagnostic: Check cache after session closes
+    cache_files_after = list(cache_dir.glob("**/*"))
+    total_size_after = sum(f.stat().st_size for f in cache_files_after if f.is_file())
+    print(f"\n[CACHE DIAGNOSTIC] After session closed:")
+    print(f"  Files in cache: {len(cache_files_after)}")
+    print(f"  Cache size: {total_size_after / 1024 / 1024:.2f} MB")
+    if total_size_after == 0:
+        print(f"  WARNING: Cache was not populated! This explains all CACHE MISS.")
+        print(f"  Possible causes:")
+        print(f"    - include_headers=False might be incompatible with SQLite backend")
+        print(f"    - aiohttp-client-cache might not be working correctly")
 
     # Write report (for CI/Telegram, etc.)
     if not dry_run:
