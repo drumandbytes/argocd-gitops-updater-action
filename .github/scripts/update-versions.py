@@ -23,6 +23,8 @@ CACHE_BACKEND = CacheBackend(
     cache_name='.registry_cache/aiohttp_cache',
     expire_after=21600,  # 6 hours
     allowed_methods=['GET'],
+    include_headers=False,  # Don't include headers in cache key (fixes auth caching)
+    ignored_params=['page'],  # Ignore pagination params for better cache reuse
 )
 
 # Async lock for file writes
