@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import time
 import asyncio
+import traceback
 from typing import Optional, Tuple, List, Set, Dict, Any
 
 import aiohttp
@@ -498,7 +499,10 @@ async def process_argo_app(session: CachedSession, app: dict, ignore_config: Opt
                 }
             )
     except Exception as e:
-        return changed_files, helm_changes, f"Failed to process {name}: {e}"
+        error_msg = f"Failed to process {name}: {type(e).__name__}: {e}"
+        print(f"  [ERROR] {error_msg}")
+        print(f"  [ERROR] Traceback:\n{traceback.format_exc()}")
+        return changed_files, helm_changes, error_msg
 
     return changed_files, helm_changes, None
 
@@ -540,7 +544,10 @@ async def process_kustomize_chart(session: CachedSession, entry: dict, ignore_co
                     }
                 )
     except Exception as e:
-        return changed_files, helm_changes, f"Failed to process {name}: {e}"
+        error_msg = f"Failed to process {name}: {type(e).__name__}: {e}"
+        print(f"  [ERROR] {error_msg}")
+        print(f"  [ERROR] Traceback:\n{traceback.format_exc()}")
+        return changed_files, helm_changes, error_msg
 
     return changed_files, helm_changes, None
 
@@ -582,7 +589,10 @@ async def process_chart_dependency(session: CachedSession, entry: dict, ignore_c
                     }
                 )
     except Exception as e:
-        return changed_files, helm_changes, f"Failed to process {name}: {e}"
+        error_msg = f"Failed to process {name}: {type(e).__name__}: {e}"
+        print(f"  [ERROR] {error_msg}")
+        print(f"  [ERROR] Traceback:\n{traceback.format_exc()}")
+        return changed_files, helm_changes, error_msg
 
     return changed_files, helm_changes, None
 
@@ -621,13 +631,13 @@ async def update_helm_charts(session: CachedSession, config: dict, ignore_config
     # Process results
     for result in results:
         if isinstance(result, Exception):
-            print(f"  [ERROR] Unexpected error: {result}")
+            print(f"  [ERROR] Unexpected exception not caught by processing function: {type(result).__name__}: {result}")
+            print(f"  [ERROR] Traceback:\n{traceback.format_exc()}")
         else:
             files, changes, error = result
             changed_files.update(files)
             helm_changes.extend(changes)
-            if error:
-                print(f"  [ERROR] {error}")
+            # Error is already logged in the processing function, no need to print again
 
     return changed_files, helm_changes
 
@@ -1011,84 +1021,89 @@ async def find_best_tags_for_same_major(session: CachedSession, registry: str, r
 
 async def update_single_docker_image(session: CachedSession, entry: dict, ignore_config: Optional[dict], dry_run: bool) -> Tuple[bool, Optional[str], Optional[str], Optional[dict]]:
     """Update a single Docker image."""
-    registry = entry.get("registry", "dockerhub")
-    repository = entry["repository"]
-    file_path = Path(entry["file"])
-    yaml_path = entry["yamlPath"]
+    try:
+        registry = entry.get("registry", "dockerhub")
+        repository = entry["repository"]
+        file_path = Path(entry["file"])
+        yaml_path = entry["yamlPath"]
 
-    print(f"\n[DOCKER] {entry['id']} in {file_path}")
-    print(f"  Registry: {registry}")
-    print(f"  Repository: {repository}")
+        print(f"\n[DOCKER] {entry['id']} in {file_path}")
+        print(f"  Registry: {registry}")
+        print(f"  Repository: {repository}")
 
-    data = await load_yaml(file_path)
+        data = await load_yaml(file_path)
 
-    # follow yamlPath to get current image string
-    cur = data
-    for key in yaml_path:
-        cur = cur[key]
-    image_str = str(cur)
+        # follow yamlPath to get current image string
+        cur = data
+        for key in yaml_path:
+            cur = cur[key]
+        image_str = str(cur)
 
-    image_name, current_tag = parse_image(image_str)
-    if not current_tag:
-        print(f"  [WARN] No tag found in image '{image_str}', skipping")
-        return False, None, None, None
+        image_name, current_tag = parse_image(image_str)
+        if not current_tag:
+            print(f"  [WARN] No tag found in image '{image_str}', skipping")
+            return False, None, None, None
 
-    print(f"  Current image: {image_str}")
+        print(f"  Current image: {image_str}")
 
-    # Check if this image should be ignored
-    ignored, reason = should_ignore_docker_image(entry, current_tag, ignore_config)
-    if ignored:
-        print(f"  [SKIP] {reason}")
-        return False, None, None, None
+        # Check if this image should be ignored
+        ignored, reason = should_ignore_docker_image(entry, current_tag, ignore_config)
+        if ignored:
+            print(f"  [SKIP] {reason}")
+            return False, None, None, None
 
-    # Get registry-specific semaphore for rate limiting
-    semaphore = REGISTRY_SEMAPHORES.get(registry)
+        # Get registry-specific semaphore for rate limiting
+        semaphore = REGISTRY_SEMAPHORES.get(registry)
 
-    best_same_tag, best_same_ver, best_any_tag, best_any_ver = await find_best_tags_for_same_major(
-        session, registry, repository, current_tag, semaphore
-    )
-
-    current_ver = parse_semver_from_tag(current_tag)
-    major_available = None
-    if current_ver and best_any_ver and best_any_ver.major > current_ver.major:
-        print(
-            f"  [INFO] New major available in {repository}: {best_any_tag} "
-            f"(current major {current_ver.major}, new major {best_any_ver.major})"
+        best_same_tag, best_same_ver, best_any_tag, best_any_ver = await find_best_tags_for_same_major(
+            session, registry, repository, current_tag, semaphore
         )
-        major_available = {
-            "id": entry["id"],
-            "current": current_tag,
-            "available": best_any_tag,
-            "current_major": current_ver.major,
-            "new_major": best_any_ver.major,
-        }
 
-    if not best_same_tag or not best_same_ver or current_ver is None:
-        print("  [INFO] No suitable same-major update found, skipping")
-        return False, None, None, major_available
+        current_ver = parse_semver_from_tag(current_tag)
+        major_available = None
+        if current_ver and best_any_ver and best_any_ver.major > current_ver.major:
+            print(
+                f"  [INFO] New major available in {repository}: {best_any_tag} "
+                f"(current major {current_ver.major}, new major {best_any_ver.major})"
+            )
+            major_available = {
+                "id": entry["id"],
+                "current": current_tag,
+                "available": best_any_tag,
+                "current_major": current_ver.major,
+                "new_major": best_any_ver.major,
+            }
 
-    if best_same_ver <= current_ver:
-        print("  -> already at latest version for this major")
-        return False, None, None, major_available
-
-    new_image = f"{image_name}:{best_same_tag}"
-    print(f"  -> updating image to {new_image}")
-
-    if dry_run:
-        return True, image_str, new_image, major_available
-
-    # Async file write with lock
-    async with FILE_WRITE_LOCK:
-        async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
-            text = await f.read()
-        new_text, count = replace_yaml_scalar(text, "image", image_str, new_image)
-        if count == 0:
-            print(f"  [WARN] Could not replace image '{image_str}' in {file_path}")
+        if not best_same_tag or not best_same_ver or current_ver is None:
+            print("  [INFO] No suitable same-major update found, skipping")
             return False, None, None, major_available
-        async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
-            await f.write(new_text)
 
-    return True, image_str, new_image, major_available
+        if best_same_ver <= current_ver:
+            print("  -> already at latest version for this major")
+            return False, None, None, major_available
+
+        new_image = f"{image_name}:{best_same_tag}"
+        print(f"  -> updating image to {new_image}")
+
+        if dry_run:
+            return True, image_str, new_image, major_available
+
+        # Async file write with lock
+        async with FILE_WRITE_LOCK:
+            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+                text = await f.read()
+            new_text, count = replace_yaml_scalar(text, "image", image_str, new_image)
+            if count == 0:
+                print(f"  [WARN] Could not replace image '{image_str}' in {file_path}")
+                return False, None, None, major_available
+            async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
+                await f.write(new_text)
+
+        return True, image_str, new_image, major_available
+    except Exception as e:
+        print(f"  [ERROR] Exception in update_single_docker_image for {entry.get('id', 'unknown')}: {type(e).__name__}: {e}")
+        print(f"  [ERROR] Traceback: {traceback.format_exc()}")
+        raise
 
 
 async def update_docker_images(session: CachedSession, config: dict, ignore_config: Optional[dict], dry_run: bool) -> Tuple[Set[str], List[dict], List[dict]]:
@@ -1109,7 +1124,9 @@ async def update_docker_images(session: CachedSession, config: dict, ignore_conf
     # Process results
     for idx, result in enumerate(results):
         if isinstance(result, Exception):
-            print(f"  [ERROR] Failed to process {entries[idx]['id']}: {result}")
+            # Exception was already logged in update_single_docker_image with full details
+            # This is just a final note that processing failed for this entry
+            print(f"  [ERROR] Skipping {entries[idx]['id']} due to exception (see details above)")
         else:
             changed, old, new, major_available = result
             if changed:
