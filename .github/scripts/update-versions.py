@@ -1332,13 +1332,16 @@ async def async_main():
     async with CachedSession(cache=CACHE_BACKEND, connector=connector) as session:
         print(f"Cache initialized: SQLite backend at .registry_cache/")
 
-        # Run Helm and Docker updates in parallel for maximum performance
-        parallel_start = time.time()
-        (helm_changed_files, helm_changes), (docker_changed_files, docker_changes, major_updates) = await asyncio.gather(
-            update_helm_charts(session, config, ignore_config, dry_run=dry_run),
-            update_docker_images(session, config, ignore_config, dry_run=dry_run)
-        )
-        parallel_duration = time.time() - parallel_start
+        # Run Helm and Docker updates sequentially to reduce network stress
+        # Parallel execution caused too many timeouts requiring retries that
+        # negated the performance benefit. Sequential is more reliable.
+        helm_start = time.time()
+        helm_changed_files, helm_changes = await update_helm_charts(session, config, ignore_config, dry_run=dry_run)
+        helm_duration = time.time() - helm_start
+
+        docker_start = time.time()
+        docker_changed_files, docker_changes, major_updates = await update_docker_images(session, config, ignore_config, dry_run=dry_run)
+        docker_duration = time.time() - docker_start
 
         changed_files |= helm_changed_files
         changed_files |= docker_changed_files
@@ -1353,8 +1356,8 @@ async def async_main():
     total_docker = len(config.get('dockerImages', []))
     print(f"\n{'='*60}")
     print(f"Performance Summary:")
-    print(f"  Resources processed in parallel: {total_helm} Helm charts + {total_docker} Docker images")
-    print(f"  Processing time: {parallel_duration:.2f}s")
+    print(f"  Helm charts: {helm_duration:.2f}s ({total_helm} charts)")
+    print(f"  Docker images: {docker_duration:.2f}s ({total_docker} images)")
     print(f"  Total time: {total_duration:.2f}s")
     print(f"{'='*60}")
 
