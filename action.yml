@@ -158,7 +158,7 @@ runs:
     - name: Install dependencies
       shell: bash
       run: |
-        pip install aiohttp>=3.9.0 aiofiles>=23.0.0 aiohttp-client-cache>=0.11.0 aiosqlite>=0.19.0 pyyaml>=6.0 packaging>=23.0
+        pip install 'aiohttp>=3.9.0' 'aiofiles>=23.0.0' 'aiohttp-client-cache>=0.11.0' 'aiosqlite>=0.19.0' 'pyyaml>=6.0' 'packaging>=23.0'
 
     - name: Auto-discover resources
       if: inputs.auto-discover == 'true'
@@ -287,6 +287,8 @@ runs:
         # Clean up cache and report after cache/save has completed
         # This runs AFTER the cache/save step, so the cache is already saved
         rm -rf .registry_cache .update-report.txt
+        # Also clean up any files created by pip install shell redirection bug (fixed but may exist from previous runs)
+        rm -f =*
 
     - name: Create Pull Request
       id: create-pr
