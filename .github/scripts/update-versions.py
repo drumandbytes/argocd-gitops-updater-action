@@ -784,11 +784,12 @@ def is_tag_candidate(tag: str, required_variant: Optional[str] = None) -> bool:
     if any(m in t_lower for m in bad_markers):
         return False
 
-    # Check variant matching
-    if required_variant is not None:
-        tag_variant = extract_variant_pattern(tag)
-        if tag_variant != required_variant:
-            return False
+    # Check variant matching - variants must match exactly (including None)
+    # If current tag has no variant, only accept tags with no variant
+    # If current tag has "alpine", only accept tags with "alpine"
+    tag_variant = extract_variant_pattern(tag)
+    if tag_variant != required_variant:
+        return False
 
     return True
 
