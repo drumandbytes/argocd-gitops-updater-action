@@ -275,7 +275,7 @@ runs:
       working-directory: ${{ inputs.working-directory }}
       run: |
         # Exclude cache and report files from diff
-        if git diff --quiet -- . ':(exclude).registry_cache' ':(exclude)*.report' ':(exclude).update-report.txt' ':(exclude).update-config.yaml.report'; then
+        if git diff --quiet -- . ':(exclude).registry_cache' ':(exclude).update-report.txt'; then
           echo "changes=false" >> $GITHUB_OUTPUT
           echo "No changes detected"
         else
@@ -289,15 +289,12 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        REPORT_FILE="${{ inputs.config-path }}.report"
         if [ -f ".update-report.txt" ]; then
           {
             echo 'report<<EOF'
             cat .update-report.txt
             echo EOF
           } >> "$GITHUB_OUTPUT"
-          # Also save to a file for later use
-          cp .update-report.txt "$REPORT_FILE"
         else
           echo "report=(No detailed update report was generated.)" >> "$GITHUB_OUTPUT"
         fi
