@@ -225,13 +225,16 @@ runs:
       if: inputs.cache-python == 'true'
       uses: actions/cache/restore@v4
       with:
-        path: ~/.cache/uv
+        path: |
+          /opt/hostedtoolcache/Python/${{ inputs.python-version }}*/x64/lib/python${{ inputs.python-version }}/site-packages
+          ~/.cache/uv
         key: python-deps-${{ runner.os }}-${{ inputs.python-version }}-${{ hashFiles(format('{0}/pyproject.toml', github.action_path)) }}-${{ inputs.cache-key-suffix }}
         restore-keys: |
           python-deps-${{ runner.os }}-${{ inputs.python-version }}-${{ hashFiles(format('{0}/pyproject.toml', github.action_path)) }}-
           python-deps-${{ runner.os }}-${{ inputs.python-version }}-
 
     - name: Install dependencies
+      if: inputs.cache-python != 'true' || steps.cache-python-restore.outputs.cache-hit != 'true'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
@@ -337,7 +340,9 @@ runs:
       if: inputs.cache-python == 'true' && steps.discovery-pr.outputs.pull-request-number == '' && steps.cache-python-restore.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
-        path: ~/.cache/uv
+        path: |
+          /opt/hostedtoolcache/Python/${{ inputs.python-version }}*/x64/lib/python${{ inputs.python-version }}/site-packages
+          ~/.cache/uv
         key: python-deps-${{ runner.os }}-${{ inputs.python-version }}-${{ hashFiles(format('{0}/pyproject.toml', github.action_path)) }}-${{ inputs.cache-key-suffix }}
 
     - name: Clean up cache before checking changes
