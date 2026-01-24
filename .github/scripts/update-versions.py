@@ -286,6 +286,12 @@ async def get_latest_helm_chart_version(session: CachedSession, repo_url: str, c
         for attempt in range(max_retries):
             try:
                 async with session.get(index_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    # Log cache hit/miss for debugging
+                    is_cached = hasattr(resp, 'from_cache') and resp.from_cache
+                    if is_cached:
+                        print(f"  [CACHE HIT] {repo_url}/{chart_name}")
+                    else:
+                        print(f"  [CACHE MISS] Fetching {repo_url}/{chart_name}")
                     resp.raise_for_status()
                     content = await resp.text()
                 break
@@ -812,6 +818,10 @@ async def list_dockerhub_tags(session: CachedSession, api_repo: str) -> List[str
         for attempt in range(max_retries):
             try:
                 async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    # Log cache hit/miss for debugging
+                    is_cached = hasattr(resp, 'from_cache') and resp.from_cache
+                    cache_status = "[CACHE HIT]" if is_cached else "[CACHE MISS]"
+                    print(f"  {cache_status} Docker Hub: {api_repo}")
                     resp.raise_for_status()
                     data = await resp.json()
                     for r in data.get("results", []):
