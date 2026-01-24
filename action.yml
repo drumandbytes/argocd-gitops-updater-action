@@ -108,7 +108,7 @@ inputs:
     default: 'false'
 
   cache-python:
-    description: 'Enable Python dependency caching (pip/uv). Speeds up setup by 3-4x on subsequent runs. Uses GitHub Actions cache storage.'
+    description: 'Enable Python dependency caching (uv cache). Speeds up setup by 3-4x on subsequent runs. No files required in your repo. Uses GitHub Actions cache storage.'
     required: false
     default: 'false'
 
@@ -214,7 +214,6 @@ runs:
       uses: actions/setup-python@v6
       with:
         python-version: ${{ inputs.python-version }}
-        cache: ${{ inputs.cache-python == 'true' && 'pip' || '' }}
 
     - name: Install uv
       uses: astral-sh/setup-uv@v7

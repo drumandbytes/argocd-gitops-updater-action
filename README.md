@@ -199,7 +199,7 @@ See [Auto-Discovery Workflow](#auto-discovery-workflow) for a complete example.
 | `dockerhub-token` | Docker Hub access token | No | - |
 | `github-token` | GitHub token for ghcr.io authentication | No | `${{ github.token }}` |
 | `cache` | Enable registry API response caching (2-3x speedup, ~10-50 MB storage) | No | `false` |
-| `cache-python` | Enable Python dependency caching (3-4x setup speedup, ~50-100 MB storage) | No | `false` |
+| `cache-python` | Enable Python dependency caching via uv (3-4x setup speedup, ~50-100 MB storage, no user files required) | No | `false` |
 | `cache-key-suffix` | Optional suffix for cache keys to manually invalidate cache (e.g., `v2`) | No | `''` |
 
 ## 📤 Outputs
@@ -379,7 +379,9 @@ This action supports **two types of caching** (both opt-in):
 | Cache Type | What It Stores | Speedup | Storage Used | Default |
 |------------|----------------|---------|--------------|---------|
 | **Registry Cache** | Docker Hub, GHCR API responses (tag lists) | 2-3x | ~10-50 MB | ❌ Disabled |
-| **Python Cache** | pip/uv dependencies | 3-4x setup speedup | ~50-100 MB | ❌ Disabled |
+| **Python Cache** | uv package cache (action's dependencies) | 3-4x setup speedup | ~50-100 MB | ❌ Disabled |
+
+> **Note**: Python cache uses uv's built-in caching and doesn't require any files in your repository.
 
 #### Expected Performance
 
@@ -416,11 +418,11 @@ cache-python: true        # Keep Python cache (usually safe)
 **Disable Python cache** when:
 - Experiencing dependency installation errors
 - Python version was changed
-- Need to troubleshoot pip/uv issues
+- Need to troubleshoot dependency issues
 
 ```yaml
 cache: true               # Keep registry cache
-cache-python: false       # Force fresh pip install
+cache-python: false       # Force fresh dependency install
 ```
 
 #### Manual Cache Invalidation
