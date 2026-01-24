@@ -284,7 +284,9 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        rm -rf .registry_cache .update-report.txt
+        # Only clean up the report file, NOT the cache
+        # The cache needs to persist for the cache/save action
+        rm -f .update-report.txt
 
     - name: Create Pull Request
       id: create-pr
