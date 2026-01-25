@@ -8,6 +8,7 @@ This async version uses:
 - aiofiles for non-blocking file I/O
 - Concurrent processing for faster discovery
 """
+
 import asyncio
 import sys
 from pathlib import Path
@@ -106,11 +107,7 @@ async def process_argo_app_file(yaml_file: Path, root: Path) -> dict | None:
             if repo_url.endswith(".git"):
                 return None
 
-            return {
-                "name": chart,
-                "repoUrl": repo_url,
-                "file": str(yaml_file.relative_to(root))
-            }
+            return {"name": chart, "repoUrl": repo_url, "file": str(yaml_file.relative_to(root))}
     except (KeyError, TypeError):
         return None
 
@@ -140,11 +137,7 @@ async def discover_kustomize_helm_charts(root: Path) -> list[dict]:
     # Convert to list format
     result = []
     for (name, repo_url), files in charts_map.items():
-        result.append({
-            "name": name,
-            "repoUrl": repo_url,
-            "files": sorted(files)
-        })
+        result.append({"name": name, "repoUrl": repo_url, "files": sorted(files)})
 
     return sorted(result, key=lambda x: x["name"])
 
@@ -193,11 +186,7 @@ async def discover_chart_dependencies(root: Path) -> list[dict]:
     # Convert to list format
     result = []
     for (name, repo_url), files in charts_map.items():
-        result.append({
-            "name": name,
-            "repoUrl": repo_url,
-            "files": sorted(files)
-        })
+        result.append({"name": name, "repoUrl": repo_url, "files": sorted(files)})
 
     return sorted(result, key=lambda x: x["name"])
 
@@ -281,9 +270,7 @@ def find_container_images_in_yaml(data: dict, current_path: list | None = None) 
             if key in data and isinstance(data[key], list):
                 for idx, container in enumerate(data[key]):
                     if isinstance(container, dict) and "image" in container:
-                        results.append(
-                            (current_path + [key, idx, "image"], container["image"])
-                        )
+                        results.append((current_path + [key, idx, "image"], container["image"]))
 
         # Recurse into other fields
         for key, value in data.items():
@@ -304,8 +291,14 @@ async def discover_docker_images(root: Path) -> list[dict]:
     """
     # Resource types that can have container images
     resource_types = {
-        "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob",
-        "Pod", "ReplicaSet", "ReplicationController"
+        "Deployment",
+        "StatefulSet",
+        "DaemonSet",
+        "Job",
+        "CronJob",
+        "Pod",
+        "ReplicaSet",
+        "ReplicationController",
     }
 
     # Find all YAML files
@@ -330,7 +323,9 @@ async def discover_docker_images(root: Path) -> list[dict]:
     return sorted(images_map.values(), key=lambda x: x["id"])
 
 
-async def process_k8s_manifest_file(yaml_file: Path, root: Path, resource_types: set) -> list[tuple[tuple[str, str], dict]]:
+async def process_k8s_manifest_file(
+    yaml_file: Path, root: Path, resource_types: set
+) -> list[tuple[tuple[str, str], dict]]:
     """Process a single Kubernetes manifest file."""
     data = await load_yaml_safe(yaml_file)
     if not data:
@@ -362,7 +357,7 @@ async def process_k8s_manifest_file(yaml_file: Path, root: Path, resource_types:
             "registry": registry,
             "repository": repository,
             "file": str(yaml_file.relative_to(root)),
-            "yamlPath": yaml_path
+            "yamlPath": yaml_path,
         }
 
         results.append((key, image_data))
@@ -379,7 +374,7 @@ async def generate_config(root: Path) -> dict:
         discover_argo_apps(root),
         discover_kustomize_helm_charts(root),
         discover_chart_dependencies(root),
-        discover_docker_images(root)
+        discover_docker_images(root),
     )
 
     print(f"  Found {len(argo_apps)} Argo CD Applications with Helm charts")
