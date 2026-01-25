@@ -497,7 +497,6 @@ MIT License - see [LICENSE](LICENSE) file for details
 
 ## 🔗 Links
 
-- [Documentation](https://github.com/drumandbytes/argocd-gitops-updater-action/blob/main/docs/VERSION_UPDATER.md)
 - [Issue Tracker](https://github.com/drumandbytes/argocd-gitops-updater-action/issues)
 - [Changelog](https://github.com/drumandbytes/argocd-gitops-updater-action/releases)
 
