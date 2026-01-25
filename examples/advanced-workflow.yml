@@ -1,4 +1,4 @@
-# Advanced workflow - With authentication, caching, and notifications
+# Advanced workflow - With authentication and notifications
 
 name: Update Versions (Advanced)
 
@@ -30,9 +30,6 @@ jobs:
           config-path: '.update-config.yaml'
           create-pr: true
           dry-run: ${{ github.event.inputs.dry-run || false }}
-
-          # Enable caching for better performance (opt-in)
-          cache: true              # Registry API caching
 
           # Docker Hub authentication (increases rate limit)
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}

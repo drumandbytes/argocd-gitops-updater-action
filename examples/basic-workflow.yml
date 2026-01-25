@@ -37,5 +37,3 @@ jobs:
           pr-branch: 'chore/update-versions'
           pr-base: 'main'
           dry-run: ${{ github.event.inputs.dry-run || false }}
-          # Optional: Enable caching for better performance
-          # cache: true

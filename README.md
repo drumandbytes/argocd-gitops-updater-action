@@ -13,7 +13,7 @@ Automatically keep your GitOps repositories up-to-date by checking for new versi
 - 🎯 **Variant Preservation** - Keeps image variants intact (alpine → alpine, slim → slim)
 - 🔍 **Auto-Discovery** - Automatically find Helm charts and Docker images in your repo
 - 📦 **Multi-Registry Support** - Docker Hub, ghcr.io, quay.io, gcr.io, and more
-- 🚀 **Performance Optimized** - Concurrent processing and HTTP caching (5-10x speedup with caching enabled)
+- 🚀 **Performance Optimized** - Concurrent async processing for fast version checks
 - 🔒 **Rate Limit Management** - Per-registry rate limiting with authentication support
 - 📊 **Smart Notifications** - Slack, Microsoft Teams, Discord, Telegram support
 - ⚠️ **Major Version Alerts** - Get notified when major version updates are available
@@ -64,16 +64,6 @@ jobs:
     dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
     dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
     create-pr: true
-```
-
-### With Caching for Better Performance
-
-```yaml
-- uses: drumandbytes/argocd-gitops-updater-action@v1
-  with:
-    config-path: '.update-config.yaml'
-    create-pr: true
-    cache: true              # Enable registry API caching
 ```
 
 ### With Notifications
@@ -187,7 +177,7 @@ See [Auto-Discovery Workflow](#auto-discovery-workflow) for a complete example.
 | `pr-base` | Base branch for the pull request | No | `main` |
 | `commit-message` | Commit message for changes | No | `chore: update Helm charts & Docker images` |
 | `dry-run` | Run in dry-run mode without making changes | No | `false` |
-| `python-version` | Python version to use | No | `3.12` |
+| `python-version` | Python version to use | No | `3.14` |
 | `notification-method` | Notification method: `telegram`, `slack`, `microsoft-teams`, `discord`, or `none` | No | `none` |
 | `telegram-bot-token` | Telegram bot token for notifications | No | - |
 | `telegram-chat-id` | Telegram chat ID for notifications | No | - |
@@ -197,7 +187,6 @@ See [Auto-Discovery Workflow](#auto-discovery-workflow) for a complete example.
 | `dockerhub-username` | Docker Hub username (increases rate limit 100→200 req/6h) | No | - |
 | `dockerhub-token` | Docker Hub access token | No | - |
 | `github-token` | GitHub token for ghcr.io authentication | No | `${{ github.token }}` |
-| `cache` | Enable registry API response caching (~10-50 MB storage) | No | `false` |
 
 ## 📤 Outputs
 
@@ -299,45 +288,6 @@ See [Notification Examples](#-notification-examples) section below for detailed 
       });
 ```
 
-### Performance: Enable Built-in Caching
-
-**Highly Recommended!** Enable built-in caching to persist registry API responses between workflow runs (5-10x speedup):
-
-```yaml
-- uses: drumandbytes/argocd-gitops-updater-action@v1
-  with:
-    config-path: '.update-config.yaml'
-    create-pr: true
-    cache: true  # Enable caching for 5-10x performance improvement
-```
-
-That's it! Just add `cache: true` and the action handles everything automatically.
-
-**How it works:**
-
-1. **Cache restore:** When enabled, the action automatically restores `.registry_cache/` from previous workflow runs
-2. **Action runs:** The updater script reads cached API responses and writes new responses to `.registry_cache/`
-3. **Cache save:** The action explicitly saves `.registry_cache/` to GitHub Actions cache storage
-4. **Automatic cleanup:** The cache directory is removed before change detection (never committed to your repository)
-
-**Cache behavior:**
-- **With `cache: true`:** Cache persists for up to 7 days between workflow runs in GitHub's cache storage
-- **With `cache: false` (default):** Cache is lost after each workflow run (but action still works, just slower)
-- **Cache key strategy:** Based on config file hash and run number for optimal cache hits
-- **Script-level caching:** The Python script caches HTTP responses for 6 hours using SQLite
-
-**Performance benefits:**
-- **First run (no cache):** ~20-30s for 10 images (mostly HTTP request time)
-- **Fully cached run (same day):** ~2-5s (5-10x faster, within 6-hour cache window)
-- **Partially cached run (next day):** ~8-15s (2-3x faster, some cache expired after 6 hours)
-- **Rate limit protection:** Dramatically fewer API calls to Docker Hub and other registries
-
-**Important notes:**
-- ✅ Cache is managed entirely by the action - no manual setup needed
-- ✅ Cache is never committed to your repository (automatically cleaned up)
-- ✅ No breaking changes - cache defaults to `false` for backward compatibility
-- ✅ Free and built into GitHub Actions (no external services needed)
-
 ## 🔐 Authentication Setup
 
 ### Docker Hub (Recommended)
@@ -369,50 +319,26 @@ The action automatically uses `${{ github.token }}` for ghcr.io authentication. 
 
 ## 📊 Performance & Rate Limits
 
-### Caching for Performance
+### Performance Features
 
-Enable registry API response caching to reduce network requests and improve performance:
-
-```yaml
-- uses: drumandbytes/argocd-gitops-updater-action@v1
-  with:
-    config-path: '.update-config.yaml'
-    cache: true              # Enable registry API caching (opt-in)
-```
-
-**Benefits:**
-- Caches Docker Hub, GHCR, and other registry API responses (tag lists)
-- Reduces redundant network calls within the 6-hour cache lifetime
-- Storage: ~10-50 MB (negligible)
-- Default: Disabled (opt-in to respect cache storage limits)
-
-**Performance Impact:**
-- Most workflows see minimal improvement from caching (a few seconds)
-- Best for workflows that run multiple times within 6 hours
-- Daily/weekly scheduled workflows may see limited benefit (cache expires)
-
-**When to Disable:**
-```yaml
-cache: false  # Use when testing/debugging version detection
-```
+- **Async Processing**: Concurrent async requests for fast version checks
+- **Smart Rate Limiting**: Per-registry semaphores prevent API throttling
+  - Docker Hub: 3 concurrent (anonymous) / 5 concurrent (authenticated)
+  - GHCR: 10 concurrent
+  - Quay/GCR: 5 concurrent each
+- **Helm Concurrency**: 5 parallel Helm chart checks
+- **Typical Performance**: ~40-60s for 10-15 resources
 
 ### Registry Rate Limits
 
-| Registry | Anonymous | Authenticated | Concurrent Limit |
-|----------|-----------|---------------|------------------|
-| Docker Hub | 100 req/6h | 200 req/6h | 3 (anon) / 5 (auth) |
-| ghcr.io | Limited | 5,000 req/h | 10 |
-| quay.io | ~100 req/min | Higher | 5 |
-| gcr.io | No strict limit | - | 5 |
+| Registry | Anonymous | Authenticated | Action Limits |
+|----------|-----------|---------------|---------------|
+| Docker Hub | 100 req/6h | 200 req/6h | 3 concurrent (anon) / 5 (auth) |
+| ghcr.io | Limited | 5,000 req/h | 10 concurrent |
+| quay.io | ~100 req/min | Higher | 5 concurrent |
+| gcr.io | No strict limit | - | 5 concurrent |
 
-**Tip**: Enable `cache: true` to reduce API calls and stay well within rate limits.
-
-### Performance Features
-
-- **HTTP Caching**: 6-hour SQLite cache for registry API responses
-- **Concurrent Processing**: Up to 10 parallel workers for image updates
-- **Smart Rate Limiting**: Per-registry semaphores prevent API throttling
-- **GitHub Actions Cache**: Persistent cache between workflow runs (opt-in)
+**Tip**: Authenticate with Docker Hub to increase rate limits (100→200 req/6h) and concurrency (3→5).
 
 ## 🎯 Supported Registries
 
@@ -540,9 +466,8 @@ telegram-chat-id: ${{ secrets.TELEGRAM_CHAT_ID }}
 **Problem**: Too many requests to Docker Hub
 
 **Solution**:
-1. **Add caching** - See [Performance: Using GitHub Actions Cache](#performance-using-github-actions-cache) section above
-2. **Add Docker Hub authentication** - Doubles rate limit from 100 to 200 requests per 6 hours (see [Authentication Setup](#-authentication-setup))
-3. **Reduce update frequency** - Run weekly instead of daily (change `cron` schedule)
+1. **Add Docker Hub authentication** - Doubles rate limit from 100 to 200 requests per 6 hours (see [Authentication Setup](#-authentication-setup))
+2. **Reduce update frequency** - Run weekly instead of daily (change `cron` schedule)
 
 ### Major Version Not Updating
 
@@ -572,7 +497,6 @@ MIT License - see [LICENSE](LICENSE) file for details
 
 ## 🔗 Links
 
-- [Documentation](https://github.com/drumandbytes/argocd-gitops-updater-action/blob/main/docs/VERSION_UPDATER.md)
 - [Issue Tracker](https://github.com/drumandbytes/argocd-gitops-updater-action/issues)
 - [Changelog](https://github.com/drumandbytes/argocd-gitops-updater-action/releases)
 

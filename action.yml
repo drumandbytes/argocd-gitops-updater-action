@@ -55,7 +55,7 @@ inputs:
   python-version:
     description: 'Python version to use'
     required: false
-    default: '3.12'
+    default: '3.14'
 
   notification-method:
     description: 'Notification method: telegram, slack, microsoft-teams, discord, or none'
@@ -102,11 +102,6 @@ inputs:
     required: false
     default: ${{ github.token }}
 
-  cache:
-    description: 'Enable registry API response caching (recommended for performance, 5-10x speedup)'
-    required: false
-    default: 'false'
-
 outputs:
   discovery-changes-detected:
     description: 'Whether auto-discovery found new resources (true/false)'
@@ -139,37 +134,6 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - name: Validate inputs
-      shell: bash
-      run: |
-        if [ "${{ inputs.auto-discover }}" != "true" ] && [ "${{ inputs.auto-discover }}" != "false" ]; then
-          echo "Error: auto-discover must be 'true' or 'false'"
-          exit 1
-        fi
-        if [ "${{ inputs.create-pr }}" != "true" ] && [ "${{ inputs.create-pr }}" != "false" ]; then
-          echo "Error: create-pr must be 'true' or 'false'"
-          exit 1
-        fi
-        if [ "${{ inputs.dry-run }}" != "true" ] && [ "${{ inputs.dry-run }}" != "false" ]; then
-          echo "Error: dry-run must be 'true' or 'false'"
-          exit 1
-        fi
-        if [ "${{ inputs.cache }}" != "true" ] && [ "${{ inputs.cache }}" != "false" ]; then
-          echo "Error: cache must be 'true' or 'false'"
-          exit 1
-        fi
-
-    - name: Restore registry cache
-      id: cache-restore
-      if: inputs.cache == 'true'
-      uses: actions/cache/restore@v5
-      with:
-        path: ${{ inputs.working-directory }}/.registry_cache
-        key: registry-cache-${{ hashFiles(format('{0}/{1}', inputs.working-directory, inputs.config-path)) }}-${{ github.run_number }}
-        restore-keys: |
-          registry-cache-${{ hashFiles(format('{0}/{1}', inputs.working-directory, inputs.config-path)) }}-
-          registry-cache-
-
     - name: Setup Python
       uses: actions/setup-python@v6
       with:
@@ -178,7 +142,7 @@ runs:
     - name: Install dependencies
       shell: bash
       run: |
-        pip install requests requests-cache pyyaml packaging
+        pip install 'aiohttp>=3.9.0' 'aiofiles>=23.0.0' 'pyyaml>=6.0' 'packaging>=23.0'
 
     - name: Auto-discover resources
       if: inputs.auto-discover == 'true'
@@ -261,21 +225,14 @@ runs:
           python "${{ github.action_path }}/.github/scripts/update-versions.py"
         fi
 
-    - name: Save registry cache
-      if: inputs.cache == 'true' && steps.discovery-pr.outputs.pull-request-number == ''
-      uses: actions/cache/save@v5
-      with:
-        path: ${{ inputs.working-directory }}/.registry_cache
-        key: registry-cache-${{ hashFiles(format('{0}/{1}', inputs.working-directory, inputs.config-path)) }}-${{ github.run_number }}
-
     - name: Check for changes
       id: check-changes
       if: steps.discovery-pr.outputs.pull-request-number == ''
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        # Exclude cache and report files from diff
-        if git diff --quiet -- . ':(exclude).registry_cache' ':(exclude).update-report.txt'; then
+        # Exclude report file from diff
+        if git diff --quiet -- . ':(exclude).update-report.txt'; then
           echo "changes=false" >> $GITHUB_OUTPUT
           echo "No changes detected"
         else
@@ -304,7 +261,10 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        rm -rf .registry_cache .update-report.txt
+        # Clean up temporary report file
+        rm -f .update-report.txt
+        # Also clean up any files created by pip install shell redirection bug (fixed but may exist from previous runs)
+        rm -f =*
 
     - name: Create Pull Request
       id: create-pr

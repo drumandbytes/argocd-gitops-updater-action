@@ -3,31 +3,27 @@ import sys
 from pathlib import Path
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock, Semaphore
-from collections import defaultdict
+import asyncio
+import traceback
+from typing import Optional, Tuple, List, Set, Dict, Any
 
-import requests
-import requests_cache
+import aiohttp
+import aiofiles
 import yaml
 from packaging.version import Version, InvalidVersion
 
 CONFIG_PATH = Path(".update-config.yaml")
 REPORT_PATH = Path(".update-report.txt")
 
-# Initialize cached session for API calls (expires after 6 hours)
-# Cache directory will be created in .registry_cache/
-# Using filesystem backend for thread-safe concurrent access
-CACHE_SESSION = requests_cache.CachedSession(
-    '.registry_cache',
-    expire_after=21600,  # 6 hours
-    backend='filesystem',
-    allowable_methods=['GET'],
-    stale_if_error=True  # Use stale cache if API is down
-)
+# Async lock for file writes
+FILE_WRITE_LOCK = asyncio.Lock()
 
-# Thread-safe lock for file writes
-FILE_WRITE_LOCK = Lock()
+# Helm chart concurrency limit to avoid overwhelming DNS and network
+# Even though Helm and Docker run sequentially, concurrent Helm requests can still cause issues
+HELM_CONCURRENCY_LIMIT = 5
+
+# Helm chart semaphore for rate limiting (will be initialized in main)
+HELM_SEMAPHORE: Optional[asyncio.Semaphore] = None
 
 # Per-registry concurrency limits to avoid rate limiting
 # These limits are conservative to stay well below API rate limits
@@ -39,11 +35,8 @@ REGISTRY_LIMITS = {
 }
 DEFAULT_REGISTRY_LIMIT = 5
 
-# Registry-specific semaphores for rate limiting
-REGISTRY_SEMAPHORES = {
-    registry: Semaphore(limit)
-    for registry, limit in REGISTRY_LIMITS.items()
-}
+# Registry-specific semaphores for rate limiting (will be initialized in main)
+REGISTRY_SEMAPHORES: Dict[str, asyncio.Semaphore] = {}
 
 # Compiled regex patterns for version normalization (module-level for performance)
 # These patterns convert non-standard version formats to PEP 440 format
@@ -52,9 +45,11 @@ PATTERN_DEBIAN_REV = re.compile(r'^v?(\d+\.\d+\.\d+)-(\d+)$')    # v1.24.1-2 →
 PATTERN_SIMPLE = re.compile(r'^v?(\d+\.\d+\.\d+)$')              # v1.24.1 → 1.24.1
 
 
-def load_yaml(path: Path):
-    with path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+async def load_yaml(path: Path) -> dict:
+    """Load YAML file asynchronously."""
+    async with aiofiles.open(path, "r", encoding="utf-8") as f:
+        content = await f.read()
+        return yaml.safe_load(content)
 
 
 def normalize_version_string(tag: str) -> str:
@@ -111,20 +106,20 @@ def normalize_version_string(tag: str) -> str:
     return core
 
 
-def retry_on_rate_limit(func, max_retries=3):
+async def retry_on_rate_limit(coro_func, max_retries=3):
     """
-    Wrapper to retry API calls if rate limited (429 error).
+    Wrapper to retry async API calls if rate limited (429 error).
     Uses exponential backoff: 2s, 4s, 8s.
     """
     for attempt in range(max_retries):
         try:
-            return func()
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:  # Rate limit exceeded
+            return await coro_func()
+        except aiohttp.ClientResponseError as e:
+            if e.status == 429:  # Rate limit exceeded
                 if attempt < max_retries - 1:
                     wait_time = 2 ** (attempt + 1)  # 2, 4, 8 seconds
                     print(f"  [WARN] Rate limited, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
-                    time.sleep(wait_time)
+                    await asyncio.sleep(wait_time)
                 else:
                     print(f"  [ERROR] Rate limit exceeded after {max_retries} attempts")
                     raise
@@ -135,73 +130,112 @@ def retry_on_rate_limit(func, max_retries=3):
     return None
 
 
-def should_ignore_docker_image(entry, tag, ignore_config):
+def build_ignore_lookups(ignore_config: Optional[dict]) -> Tuple[Dict[str, dict], Dict[str, dict]]:
+    """
+    Build optimized lookup structures for ignore rules with pre-compiled regex patterns.
+
+    Returns:
+        (docker_ignore_by_id, helm_ignore_by_name) - O(1) lookup dicts with compiled patterns
+    """
+    docker_ignore_by_id = {}
+    helm_ignore_by_name = {}
+
+    if not ignore_config:
+        return docker_ignore_by_id, helm_ignore_by_name
+
+    # Process Docker image ignore rules
+    docker_ignores = ignore_config.get("dockerImages", [])
+    for ignore_rule in docker_ignores:
+        if "id" in ignore_rule:
+            # Pre-compile regex patterns for performance
+            processed_rule = ignore_rule.copy()
+
+            if "versionPattern" in ignore_rule:
+                processed_rule["_compiled_version_pattern"] = re.compile(ignore_rule["versionPattern"])
+
+            if "tagPattern" in ignore_rule:
+                processed_rule["_compiled_tag_pattern"] = re.compile(ignore_rule["tagPattern"])
+
+            docker_ignore_by_id[ignore_rule["id"]] = processed_rule
+
+    # Process Helm chart ignore rules
+    helm_ignores = ignore_config.get("helmCharts", [])
+    for ignore_rule in helm_ignores:
+        if "name" in ignore_rule:
+            processed_rule = ignore_rule.copy()
+
+            if "versionPattern" in ignore_rule:
+                processed_rule["_compiled_version_pattern"] = re.compile(ignore_rule["versionPattern"])
+
+            helm_ignore_by_name[ignore_rule["name"]] = processed_rule
+
+    return docker_ignore_by_id, helm_ignore_by_name
+
+
+def should_ignore_docker_image(entry: dict, tag: str, docker_ignore_by_id: Dict[str, dict]) -> Tuple[bool, Optional[str]]:
     """
     Check if a Docker image should be ignored based on ignore configuration.
 
     Args:
         entry: Docker image entry from config
         tag: Current tag of the image
-        ignore_config: ignore section from config
+        docker_ignore_by_id: Pre-built lookup dict with compiled regex patterns
 
     Returns:
         (should_ignore: bool, reason: str)
     """
-    if not ignore_config:
+    if not docker_ignore_by_id:
         return False, None
 
-    docker_ignores = ignore_config.get("dockerImages", [])
+    # O(1) lookup by ID
+    entry_id = entry.get("id")
+    if entry_id and entry_id in docker_ignore_by_id:
+        ignore_rule = docker_ignore_by_id[entry_id]
 
-    for ignore_rule in docker_ignores:
-        # Check by ID
-        if "id" in ignore_rule and ignore_rule["id"] == entry.get("id"):
+        # If there's a versionPattern, don't skip the image entirely
+        # The pattern will be used to filter out specific versions during tag selection
+        if "versionPattern" not in ignore_rule:
+            # No version pattern means ignore all versions of this image
             return True, f"ignored by ID: {ignore_rule['id']}"
 
-        # Check by repository
-        if "repository" in ignore_rule and ignore_rule["repository"] == entry.get("repository"):
-            # Check if there's a tag pattern
-            if "tagPattern" in ignore_rule:
-                pattern = ignore_rule["tagPattern"]
-                if re.match(pattern, tag):
-                    return True, f"ignored by repository + tag pattern: {ignore_rule['repository']} with tag {pattern}"
-            else:
-                return True, f"ignored by repository: {ignore_rule['repository']}"
+        # Check tag pattern if present (uses pre-compiled regex)
+        if "_compiled_tag_pattern" in ignore_rule:
+            if ignore_rule["_compiled_tag_pattern"].match(tag):
+                return True, f"ignored by ID + tag pattern: {ignore_rule['id']}"
 
     return False, None
 
 
-def should_ignore_helm_chart(name, version, ignore_config):
+def should_ignore_helm_chart(name: str, version: str, helm_ignore_by_name: Dict[str, dict]) -> Tuple[bool, Optional[str]]:
     """
     Check if a Helm chart should be ignored based on ignore configuration.
 
     Args:
         name: Helm chart name
         version: Current version of the chart
-        ignore_config: ignore section from config
+        helm_ignore_by_name: Pre-built lookup dict with compiled regex patterns
 
     Returns:
         (should_ignore: bool, reason: str)
     """
-    if not ignore_config:
+    if not helm_ignore_by_name:
         return False, None
 
-    helm_ignores = ignore_config.get("helmCharts", [])
+    # O(1) lookup by name
+    if name in helm_ignore_by_name:
+        ignore_rule = helm_ignore_by_name[name]
 
-    for ignore_rule in helm_ignores:
-        # Check by name
-        if "name" in ignore_rule and ignore_rule["name"] == name:
-            # Check if there's a version pattern
-            if "versionPattern" in ignore_rule:
-                pattern = ignore_rule["versionPattern"]
-                if re.match(pattern, version):
-                    return True, f"ignored by name + version pattern: {name} with version {pattern}"
-            else:
-                return True, f"ignored by name: {name}"
+        # Check if there's a version pattern (uses pre-compiled regex)
+        if "_compiled_version_pattern" in ignore_rule:
+            if ignore_rule["_compiled_version_pattern"].match(version):
+                return True, f"ignored by name + version pattern: {name} with version {ignore_rule['versionPattern']}"
+        else:
+            return True, f"ignored by name: {name}"
 
     return False, None
 
 
-def latest_semver(versions):
+def latest_semver(versions: List[str]) -> Optional[str]:
     """
     Find the latest stable semver version from a list.
     Filters out alpha, beta, rc, and pre-release versions.
@@ -232,7 +266,7 @@ def latest_semver(versions):
     return valid[-1][1]
 
 
-def replace_yaml_scalar(text: str, key: str, old: str, new: str) -> tuple[str, int]:
+def replace_yaml_scalar(text: str, key: str, old: str, new: str) -> Tuple[str, int]:
     """
     Replace a YAML scalar value, handling both quoted and unquoted values.
 
@@ -270,16 +304,30 @@ def replace_yaml_scalar(text: str, key: str, old: str, new: str) -> tuple[str, i
 # ----------------- HELM STUFF -----------------
 
 
-def get_latest_helm_chart_version(repo_url, chart_name):
+async def get_latest_helm_chart_version(session: aiohttp.ClientSession, repo_url: str, chart_name: str) -> Optional[str]:
+    """Get the latest Helm chart version from a repository."""
     index_url = repo_url.rstrip("/") + "/index.yaml"
-    resp = CACHE_SESSION.get(index_url, timeout=10)
-    resp.raise_for_status()
 
-    # Decode response with UTF-8 encoding, replacing bad characters
-    try:
-        content = resp.content.decode('utf-8', errors='replace')
-    except Exception:
-        content = resp.text
+    # Use semaphore to limit concurrent Helm chart requests
+    async with HELM_SEMAPHORE:
+        # Retry logic for transient network errors
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with session.get(index_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    resp.raise_for_status()
+                    content = await resp.text()
+                break
+            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                    print(f"  [WARN] Helm chart request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}")
+                    await asyncio.sleep(wait_time)
+                else:
+                    error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                    print(f"  [ERROR] Helm chart request failed after {max_retries} attempts: {error_msg}")
+                    raise
 
     index = yaml.safe_load(content)
     entries = index.get("entries", {}).get(chart_name, [])
@@ -287,12 +335,12 @@ def get_latest_helm_chart_version(repo_url, chart_name):
     return latest_semver(versions)
 
 
-def update_argo_app_chart(file_path: Path, chart_name: str, latest_version: str, dry_run: bool):
+async def update_argo_app_chart(file_path: Path, chart_name: str, latest_version: str, dry_run: bool) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Update spec.source.targetRevision for an Argo CD Application without
     re-dumping the whole YAML. Returns (changed, old, new).
     """
-    data = load_yaml(file_path)
+    data = await load_yaml(file_path)
 
     try:
         source = data["spec"]["source"]
@@ -327,24 +375,26 @@ def update_argo_app_chart(file_path: Path, chart_name: str, latest_version: str,
     if dry_run:
         return True, current, latest_version
 
-    # Thread-safe file write
-    with FILE_WRITE_LOCK:
-        text = file_path.read_text(encoding="utf-8")
+    # Async file write with lock
+    async with FILE_WRITE_LOCK:
+        async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+            text = await f.read()
         new_text, count = replace_yaml_scalar(text, "targetRevision", current, latest_version)
         if count == 0:
             print(f"  [WARN] Could not replace targetRevision in {file_path} (no matching line), skipping write")
             return False, None, None
-        file_path.write_text(new_text, encoding="utf-8")
+        async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
+            await f.write(new_text)
 
     return True, current, latest_version
 
 
-def update_kustomize_helm_chart(file_path: Path, chart_name: str, latest_version: str, dry_run: bool):
+async def update_kustomize_helm_chart(file_path: Path, chart_name: str, latest_version: str, dry_run: bool) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Update helmCharts[].version for a given chart in a kustomization.yaml file
     using text-level replacement. Returns (changed, old, new) for the first change.
     """
-    data = load_yaml(file_path)
+    data = await load_yaml(file_path)
 
     charts = data.get("helmCharts")
     if not isinstance(charts, list):
@@ -385,24 +435,26 @@ def update_kustomize_helm_chart(file_path: Path, chart_name: str, latest_version
     if dry_run:
         return True, target_current, latest_version
 
-    # Thread-safe file write
-    with FILE_WRITE_LOCK:
-        text = file_path.read_text(encoding="utf-8")
+    # Async file write with lock
+    async with FILE_WRITE_LOCK:
+        async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+            text = await f.read()
         new_text, count = replace_yaml_scalar(text, "version", target_current, latest_version)
         if count == 0:
             print(f"  [WARN] Could not find 'version: {target_current}' in {file_path} for chart {chart_name}")
             return False, None, None
-        file_path.write_text(new_text, encoding="utf-8")
+        async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
+            await f.write(new_text)
 
     return True, target_current, latest_version
 
 
-def update_chart_yaml(file_path: Path, chart_name: str, latest_version: str, dry_run: bool):
+async def update_chart_yaml(file_path: Path, chart_name: str, latest_version: str, dry_run: bool) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Update dependencies[].version for a given chart in a Chart.yaml file
     using text-level replacement. Returns (changed, old, new) for the first change.
     """
-    data = load_yaml(file_path)
+    data = await load_yaml(file_path)
 
     dependencies = data.get("dependencies")
     if not isinstance(dependencies, list):
@@ -443,19 +495,21 @@ def update_chart_yaml(file_path: Path, chart_name: str, latest_version: str, dry
     if dry_run:
         return True, target_current, latest_version
 
-    # Thread-safe file write
-    with FILE_WRITE_LOCK:
-        text = file_path.read_text(encoding="utf-8")
+    # Async file write with lock
+    async with FILE_WRITE_LOCK:
+        async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+            text = await f.read()
         new_text, count = replace_yaml_scalar(text, "version", target_current, latest_version)
         if count == 0:
             print(f"  [WARN] Could not find 'version: {target_current}' in {file_path} for chart {chart_name}")
             return False, None, None
-        file_path.write_text(new_text, encoding="utf-8")
+        async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
+            await f.write(new_text)
 
     return True, target_current, latest_version
 
 
-def process_argo_app(app, ignore_config, dry_run):
+async def process_argo_app(session: aiohttp.ClientSession, app: dict, helm_ignore_by_name: Dict[str, dict], dry_run: bool) -> Tuple[Set[str], List[dict], Optional[str]]:
     """Process a single Argo CD app. Returns (changed_files, helm_changes, errors)."""
     changed_files = set()
     helm_changes = []
@@ -468,24 +522,24 @@ def process_argo_app(app, ignore_config, dry_run):
 
     try:
         # Check current version to see if ignored
-        data = load_yaml(file_path)
+        data = await load_yaml(file_path)
         current_version = ""
         try:
             current_version = str(data["spec"]["source"].get("targetRevision", ""))
         except (KeyError, TypeError):
             pass
 
-        ignored, reason = should_ignore_helm_chart(name, current_version, ignore_config)
+        ignored, reason = should_ignore_helm_chart(name, current_version, helm_ignore_by_name)
         if ignored:
             print(f"  [SKIP] {reason}")
             return changed_files, helm_changes, None
 
-        latest = get_latest_helm_chart_version(repo_url, name)
+        latest = await get_latest_helm_chart_version(session, repo_url, name)
         if not latest:
             print(f"  [WARN] No valid versions found in {repo_url} for {name}")
             return changed_files, helm_changes, None
 
-        changed, old, new = update_argo_app_chart(file_path, name, latest, dry_run)
+        changed, old, new = await update_argo_app_chart(file_path, name, latest, dry_run)
         if changed:
             changed_files.add(str(file_path))
             helm_changes.append(
@@ -498,12 +552,15 @@ def process_argo_app(app, ignore_config, dry_run):
                 }
             )
     except Exception as e:
-        return changed_files, helm_changes, f"Failed to process {name}: {e}"
+        error_msg = f"Failed to process {name}: {type(e).__name__}: {e}"
+        print(f"  [ERROR] {error_msg}")
+        print(f"  [ERROR] Traceback:\n{traceback.format_exc()}")
+        return changed_files, helm_changes, error_msg
 
     return changed_files, helm_changes, None
 
 
-def process_kustomize_chart(entry, ignore_config, dry_run):
+async def process_kustomize_chart(session: aiohttp.ClientSession, entry: dict, helm_ignore_by_name: Dict[str, dict], dry_run: bool) -> Tuple[Set[str], List[dict], Optional[str]]:
     """Process a single Kustomize Helm chart. Returns (changed_files, helm_changes, errors)."""
     changed_files = set()
     helm_changes = []
@@ -515,19 +572,19 @@ def process_kustomize_chart(entry, ignore_config, dry_run):
 
     try:
         # For kustomize, we'll check with empty version (can add more sophisticated check if needed)
-        ignored, reason = should_ignore_helm_chart(name, "", ignore_config)
+        ignored, reason = should_ignore_helm_chart(name, "", helm_ignore_by_name)
         if ignored:
             print(f"  [SKIP] {reason}")
             return changed_files, helm_changes, None
 
-        latest = get_latest_helm_chart_version(repo_url, name)
+        latest = await get_latest_helm_chart_version(session, repo_url, name)
         if not latest:
             print(f"  [WARN] No valid versions found in {repo_url} for {name}")
             return changed_files, helm_changes, None
 
         for f in entry.get("files", []):
             file_path = Path(f)
-            changed, old, new = update_kustomize_helm_chart(file_path, name, latest, dry_run)
+            changed, old, new = await update_kustomize_helm_chart(file_path, name, latest, dry_run)
             if changed:
                 changed_files.add(str(file_path))
                 helm_changes.append(
@@ -540,12 +597,15 @@ def process_kustomize_chart(entry, ignore_config, dry_run):
                     }
                 )
     except Exception as e:
-        return changed_files, helm_changes, f"Failed to process {name}: {e}"
+        error_msg = f"Failed to process {name}: {type(e).__name__}: {e}"
+        print(f"  [ERROR] {error_msg}")
+        print(f"  [ERROR] Traceback:\n{traceback.format_exc()}")
+        return changed_files, helm_changes, error_msg
 
     return changed_files, helm_changes, None
 
 
-def process_chart_dependency(entry, ignore_config, dry_run):
+async def process_chart_dependency(session: aiohttp.ClientSession, entry: dict, helm_ignore_by_name: Dict[str, dict], dry_run: bool) -> Tuple[Set[str], List[dict], Optional[str]]:
     """Process a single Chart.yaml dependency. Returns (changed_files, helm_changes, errors)."""
     changed_files = set()
     helm_changes = []
@@ -557,19 +617,19 @@ def process_chart_dependency(entry, ignore_config, dry_run):
 
     try:
         # Check if chart is ignored
-        ignored, reason = should_ignore_helm_chart(name, "", ignore_config)
+        ignored, reason = should_ignore_helm_chart(name, "", helm_ignore_by_name)
         if ignored:
             print(f"  [SKIP] {reason}")
             return changed_files, helm_changes, None
 
-        latest = get_latest_helm_chart_version(repo_url, name)
+        latest = await get_latest_helm_chart_version(session, repo_url, name)
         if not latest:
             print(f"  [WARN] No valid versions found in {repo_url} for {name}")
             return changed_files, helm_changes, None
 
         for f in entry.get("files", []):
             file_path = Path(f)
-            changed, old, new = update_chart_yaml(file_path, name, latest, dry_run)
+            changed, old, new = await update_chart_yaml(file_path, name, latest, dry_run)
             if changed:
                 changed_files.add(str(file_path))
                 helm_changes.append(
@@ -582,14 +642,18 @@ def process_chart_dependency(entry, ignore_config, dry_run):
                     }
                 )
     except Exception as e:
-        return changed_files, helm_changes, f"Failed to process {name}: {e}"
+        error_msg = f"Failed to process {name}: {type(e).__name__}: {e}"
+        print(f"  [ERROR] {error_msg}")
+        print(f"  [ERROR] Traceback:\n{traceback.format_exc()}")
+        return changed_files, helm_changes, error_msg
 
     return changed_files, helm_changes, None
 
 
-def update_helm_charts(config, ignore_config, dry_run: bool):
+async def update_helm_charts(session: aiohttp.ClientSession, config: dict, helm_ignore_by_name: Dict[str, dict], dry_run: bool) -> Tuple[Set[str], List[dict]]:
+    """Update all Helm charts concurrently."""
     changed_files = set()
-    helm_changes = []  # list of dicts: {type, name, file, from, to}
+    helm_changes = []
 
     argo_apps = config.get("argoApps", [])
     kustomize_charts = config.get("kustomizeHelmCharts", [])
@@ -603,30 +667,30 @@ def update_helm_charts(config, ignore_config, dry_run: bool):
     if not all_tasks:
         return changed_files, helm_changes
 
-    # Process Helm charts concurrently (max 10 workers)
-    max_workers = min(10, len(all_tasks))
+    # Process Helm charts concurrently using asyncio.gather
+    tasks = []
+    for task_type, item in all_tasks:
+        if task_type == "argo":
+            task = process_argo_app(session, item, helm_ignore_by_name, dry_run)
+        elif task_type == "kustomize":
+            task = process_kustomize_chart(session, item, helm_ignore_by_name, dry_run)
+        else:  # chartDep
+            task = process_chart_dependency(session, item, helm_ignore_by_name, dry_run)
+        tasks.append(task)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = []
-        for task_type, item in all_tasks:
-            if task_type == "argo":
-                future = executor.submit(process_argo_app, item, ignore_config, dry_run)
-            elif task_type == "kustomize":
-                future = executor.submit(process_kustomize_chart, item, ignore_config, dry_run)
-            else:  # chartDep
-                future = executor.submit(process_chart_dependency, item, ignore_config, dry_run)
-            futures.append(future)
+    # Gather all results
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Collect results as they complete
-        for future in as_completed(futures):
-            try:
-                files, changes, error = future.result()
-                changed_files.update(files)
-                helm_changes.extend(changes)
-                if error:
-                    print(f"  [ERROR] {error}")
-            except Exception as e:
-                print(f"  [ERROR] Unexpected error: {e}")
+    # Process results
+    for result in results:
+        if isinstance(result, Exception):
+            print(f"  [ERROR] Unexpected exception not caught by processing function: {type(result).__name__}: {result}")
+            print(f"  [ERROR] Traceback:\n{traceback.format_exc()}")
+        else:
+            files, changes, error = result
+            changed_files.update(files)
+            helm_changes.extend(changes)
+            # Error is already logged in the processing function, no need to print again
 
     return changed_files, helm_changes
 
@@ -634,7 +698,7 @@ def update_helm_charts(config, ignore_config, dry_run: bool):
 # ----------------- DOCKER STUFF (Docker Hub, semver-aware) -----------------
 
 
-def parse_image(image_str: str):
+def parse_image(image_str: str) -> Tuple[str, str]:
     """
     Split 'repo:tag' or 'registry/repo:tag' into (name, tag).
     """
@@ -644,7 +708,7 @@ def parse_image(image_str: str):
     return name, tag
 
 
-def extract_semver_core(tag: str) -> str | None:
+def extract_semver_core(tag: str) -> Optional[str]:
     """
     Extract a semver-ish core from a tag by taking leading [0-9.] chars.
     """
@@ -657,7 +721,7 @@ def extract_semver_core(tag: str) -> str | None:
     return core or None
 
 
-def parse_semver_from_tag(tag: str) -> Version | None:
+def parse_semver_from_tag(tag: str) -> Optional[Version]:
     """
     Parse a version tag into a packaging.version.Version object.
 
@@ -685,7 +749,7 @@ def parse_semver_from_tag(tag: str) -> Version | None:
         return None
 
 
-def extract_variant_pattern(tag: str) -> str | None:
+def extract_variant_pattern(tag: str) -> Optional[str]:
     """
     Extract the variant/flavor pattern from a Docker tag.
 
@@ -722,7 +786,7 @@ def extract_variant_pattern(tag: str) -> str | None:
     return None
 
 
-def is_tag_candidate(tag: str, required_variant: str | None = None) -> bool:
+def is_tag_candidate(tag: str, required_variant: Optional[str] = None) -> bool:
     """
     Decide whether a tag is eligible for automatic updates.
 
@@ -740,16 +804,17 @@ def is_tag_candidate(tag: str, required_variant: str | None = None) -> bool:
     if any(m in t_lower for m in bad_markers):
         return False
 
-    # Check variant matching
-    if required_variant is not None:
-        tag_variant = extract_variant_pattern(tag)
-        if tag_variant != required_variant:
-            return False
+    # Check variant matching - variants must match exactly (including None)
+    # If current tag has no variant, only accept tags with no variant
+    # If current tag has "alpine", only accept tags with "alpine"
+    tag_variant = extract_variant_pattern(tag)
+    if tag_variant != required_variant:
+        return False
 
     return True
 
 
-def list_dockerhub_tags(api_repo: str) -> list[str]:
+async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> List[str]:
     """
     List tags from Docker Hub.
 
@@ -760,7 +825,7 @@ def list_dockerhub_tags(api_repo: str) -> list[str]:
     import base64
 
     url = f"https://registry.hub.docker.com/v2/repositories/{api_repo}/tags?page_size=100"
-    tags: list[str] = []
+    tags: List[str] = []
     headers = {}
 
     # Check for Docker Hub authentication
@@ -774,19 +839,34 @@ def list_dockerhub_tags(api_repo: str) -> list[str]:
         headers["Authorization"] = f"Basic {encoded}"
 
     while url:
-        resp = CACHE_SESSION.get(url, headers=headers, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        for r in data.get("results", []):
-            name = r.get("name")
-            if name:
-                tags.append(name)
-        url = data.get("next")
+        # Retry logic for transient network errors
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    for r in data.get("results", []):
+                        name = r.get("name")
+                        if name:
+                            tags.append(name)
+                    url = data.get("next")
+                break
+            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                    print(f"  [WARN] Docker Hub request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}")
+                    await asyncio.sleep(wait_time)
+                else:
+                    error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                    print(f"  [ERROR] Docker Hub request failed after {max_retries} attempts: {error_msg}")
+                    raise
 
     return tags
 
 
-def list_ghcr_tags(repository: str) -> list[str]:
+async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> List[str]:
     """
     List tags from GitHub Container Registry (ghcr.io).
 
@@ -814,25 +894,37 @@ def list_ghcr_tags(repository: str) -> list[str]:
 
     try:
         while url:
-            resp = CACHE_SESSION.get(url, headers=headers, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
-            tags = data.get("tags", [])
-            all_tags.extend(tags)
+            # Retry logic for transient network errors
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        resp.raise_for_status()
+                        data = await resp.json()
+                        tags = data.get("tags", [])
+                        all_tags.extend(tags)
 
-            # Check for pagination link in Link header
-            link_header = resp.headers.get("Link", "")
-            if link_header and 'rel="next"' in link_header:
-                # Extract next URL from Link header
-                # Format: </v2/repo/tags/list?n=100&last=tag>; rel="next"
-                import re
-                match = re.search(r'<(/v2/[^>]+)>;\s*rel="next"', link_header)
-                if match:
-                    url = f"https://ghcr.io{match.group(1)}"
-                else:
+                        # Check for pagination link in Link header
+                        link_header = resp.headers.get("Link", "")
+                        if link_header and 'rel="next"' in link_header:
+                            # Extract next URL from Link header
+                            # Format: </v2/repo/tags/list?n=100&last=tag>; rel="next"
+                            match = re.search(r'<(/v2/[^>]+)>;\s*rel="next"', link_header)
+                            if match:
+                                url = f"https://ghcr.io{match.group(1)}"
+                            else:
+                                break
+                        else:
+                            break
                     break
-            else:
-                break
+                except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                        print(f"  [WARN] GHCR request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        raise
 
         return all_tags
     except Exception as e:
@@ -840,28 +932,41 @@ def list_ghcr_tags(repository: str) -> list[str]:
         return []
 
 
-def list_quay_tags(repository: str) -> list[str]:
+async def list_quay_tags(session: aiohttp.ClientSession, repository: str) -> List[str]:
     """List tags from Quay.io."""
     url = f"https://quay.io/api/v1/repository/{repository}/tag/?limit=100&page=1"
-    tags: list[str] = []
+    tags: List[str] = []
 
     try:
         while url:
-            resp = CACHE_SESSION.get(url, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
+            # Retry logic for transient network errors
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        resp.raise_for_status()
+                        data = await resp.json()
 
-            for tag_data in data.get("tags", []):
-                name = tag_data.get("name")
-                if name:
-                    tags.append(name)
+                        for tag_data in data.get("tags", []):
+                            name = tag_data.get("name")
+                            if name:
+                                tags.append(name)
 
-            # Check if there are more pages
-            if data.get("has_additional"):
-                page = data.get("page", 1) + 1
-                url = f"https://quay.io/api/v1/repository/{repository}/tag/?limit=100&page={page}"
-            else:
-                url = None
+                        # Check if there are more pages
+                        if data.get("has_additional"):
+                            page = data.get("page", 1) + 1
+                            url = f"https://quay.io/api/v1/repository/{repository}/tag/?limit=100&page={page}"
+                        else:
+                            url = None
+                    break
+                except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                        print(f"  [WARN] Quay.io request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        raise
 
         return tags
     except Exception as e:
@@ -869,7 +974,7 @@ def list_quay_tags(repository: str) -> list[str]:
         return []
 
 
-def list_gcr_tags(repository: str) -> list[str]:
+async def list_gcr_tags(session: aiohttp.ClientSession, repository: str) -> List[str]:
     """
     List tags from Google Container Registry (gcr.io).
 
@@ -880,19 +985,31 @@ def list_gcr_tags(repository: str) -> list[str]:
     url = f"https://gcr.io/v2/{repository}/tags/list"
 
     try:
-        resp = CACHE_SESSION.get(url, timeout=10)
-        if resp.status_code == 401:
-            print(f"  [WARN] gcr.io repository {repository} requires authentication")
-            return []
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("tags", [])
+        # Retry logic for transient network errors
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 401:
+                        print(f"  [WARN] gcr.io repository {repository} requires authentication")
+                        return []
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    return data.get("tags", [])
+            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                    print(f"  [WARN] GCR request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}")
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
     except Exception as e:
         print(f"  [WARN] Failed to fetch gcr.io tags for {repository}: {e}")
         return []
 
 
-def list_registry_tags(registry: str, repository: str) -> list[str]:
+async def list_registry_tags(session: aiohttp.ClientSession, registry: str, repository: str) -> List[str]:
     """
     List tags from any container registry.
 
@@ -904,38 +1021,42 @@ def list_registry_tags(registry: str, repository: str) -> list[str]:
     - generic Docker Registry V2 API compatible registries
     """
     if registry == "dockerhub":
-        return list_dockerhub_tags(repository)
+        return await list_dockerhub_tags(session, repository)
     elif registry == "ghcr.io":
-        return list_ghcr_tags(repository)
+        return await list_ghcr_tags(session, repository)
     elif registry == "quay.io":
-        return list_quay_tags(repository)
+        return await list_quay_tags(session, repository)
     elif registry == "gcr.io":
-        return list_gcr_tags(repository)
+        return await list_gcr_tags(session, repository)
     else:
         # Try generic Docker Registry V2 API
         print(f"  [INFO] Trying generic Docker Registry V2 API for {registry}")
         url = f"https://{registry}/v2/{repository}/tags/list"
         try:
-            resp = CACHE_SESSION.get(url, timeout=10)
-            if resp.status_code == 401:
-                print(f"  [WARN] Registry {registry} requires authentication")
-                return []
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("tags", [])
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 401:
+                    print(f"  [WARN] Registry {registry} requires authentication")
+                    return []
+                resp.raise_for_status()
+                data = await resp.json()
+                return data.get("tags", [])
         except Exception as e:
             print(f"  [WARN] Failed to fetch tags from {registry}: {e}")
             return []
 
 
-def find_best_tags_for_same_major(registry: str, repository: str, current_tag: str):
+async def find_best_tags_for_same_major(session: aiohttp.ClientSession, registry: str, repository: str, current_tag: str, semaphore: Optional[asyncio.Semaphore] = None, entry: Optional[dict] = None, docker_ignore_by_id: Optional[Dict[str, dict]] = None) -> Tuple[Optional[str], Optional[Version], Optional[str], Optional[Version]]:
     """
     Find the best tags for the same major version.
 
     Args:
+        session: The aiohttp client session
         registry: The container registry (dockerhub, ghcr.io, etc.)
         repository: The repository path
         current_tag: The current tag to compare against
+        semaphore: Optional semaphore for rate limiting
+        entry: Docker image entry (for ignore pattern matching)
+        ignore_config: Ignore configuration (for version pattern filtering)
 
     Returns:
         Tuple of (best_same_tag, best_same_ver, best_any_tag, best_any_ver)
@@ -950,13 +1071,32 @@ def find_best_tags_for_same_major(registry: str, repository: str, current_tag: s
     if current_variant:
         print(f"  [INFO] Detected image variant: {current_variant} (will only consider {current_variant} tags)")
 
-    tags = list_registry_tags(registry, repository)
+    # Use semaphore if provided for rate limiting
+    if semaphore:
+        async with semaphore:
+            tags = await list_registry_tags(session, registry, repository)
+    else:
+        tags = await list_registry_tags(session, registry, repository)
+
     if not tags:
         print(f"  [WARN] No tags found in registry {registry} for repo {repository}")
         return None, None, None, None
 
-    same_major: list[tuple[Version, str]] = []
-    all_versions: list[tuple[Version, str]] = []
+    # Filter tags based on versionPattern in ignore rules (using pre-compiled regex)
+    if entry and docker_ignore_by_id:
+        entry_id = entry.get("id")
+        if entry_id and entry_id in docker_ignore_by_id:
+            ignore_rule = docker_ignore_by_id[entry_id]
+            if "_compiled_version_pattern" in ignore_rule:
+                compiled_pattern = ignore_rule["_compiled_version_pattern"]
+                original_count = len(tags)
+                tags = [t for t in tags if not compiled_pattern.match(t)]
+                filtered_count = original_count - len(tags)
+                if filtered_count > 0:
+                    print(f"  [INFO] Filtered out {filtered_count} tags matching versionPattern: {ignore_rule['versionPattern']}")
+
+    same_major: List[Tuple[Version, str]] = []
+    all_versions: List[Tuple[Version, str]] = []
 
     for t in tags:
         # Filter by variant if current tag has one
@@ -1001,130 +1141,142 @@ def find_best_tags_for_same_major(registry: str, repository: str, current_tag: s
     return best_same_tag, best_same_ver, best_any_tag, best_any_ver
 
 
-def update_single_docker_image(entry, ignore_config, dry_run: bool):
-    registry = entry.get("registry", "dockerhub")
-    repository = entry["repository"]
-    file_path = Path(entry["file"])
-    yaml_path = entry["yamlPath"]
+async def update_single_docker_image(session: aiohttp.ClientSession, entry: dict, docker_ignore_by_id: Dict[str, dict], dry_run: bool) -> Tuple[bool, Optional[str], Optional[str], Optional[dict]]:
+    """Update a single Docker image."""
+    try:
+        registry = entry.get("registry", "dockerhub")
+        repository = entry["repository"]
+        file_path = Path(entry["file"])
+        yaml_path = entry["yamlPath"]
 
-    print(f"\n[DOCKER] {entry['id']} in {file_path}")
-    print(f"  Registry: {registry}")
-    print(f"  Repository: {repository}")
+        print(f"\n[DOCKER] {entry['id']} in {file_path}")
+        print(f"  Registry: {registry}")
+        print(f"  Repository: {repository}")
 
-    data = load_yaml(file_path)
+        data = await load_yaml(file_path)
 
-    # follow yamlPath to get current image string
-    cur = data
-    for key in yaml_path:
-        cur = cur[key]
-    image_str = str(cur)
+        # follow yamlPath to get current image string
+        cur = data
+        for key in yaml_path:
+            cur = cur[key]
+        image_str = str(cur)
 
-    image_name, current_tag = parse_image(image_str)
-    if not current_tag:
-        print(f"  [WARN] No tag found in image '{image_str}', skipping")
-        return False, None, None, None
+        image_name, current_tag = parse_image(image_str)
+        if not current_tag:
+            print(f"  [WARN] No tag found in image '{image_str}', skipping")
+            return False, None, None, None
 
-    print(f"  Current image: {image_str}")
+        print(f"  Current image: {image_str}")
 
-    # Check if this image should be ignored
-    ignored, reason = should_ignore_docker_image(entry, current_tag, ignore_config)
-    if ignored:
-        print(f"  [SKIP] {reason}")
-        return False, None, None, None
+        # Check if this image should be ignored
+        ignored, reason = should_ignore_docker_image(entry, current_tag, docker_ignore_by_id)
+        if ignored:
+            print(f"  [SKIP] {reason}")
+            return False, None, None, None
 
-    # Acquire registry-specific semaphore to limit concurrent requests per registry
-    semaphore = REGISTRY_SEMAPHORES.get(registry)
-    if semaphore:
-        with semaphore:
-            best_same_tag, best_same_ver, best_any_tag, best_any_ver = find_best_tags_for_same_major(
-                registry, repository, current_tag
-            )
-    else:
-        # For unknown registries, no rate limiting
-        best_same_tag, best_same_ver, best_any_tag, best_any_ver = find_best_tags_for_same_major(
-            registry, repository, current_tag
+        # Get registry-specific semaphore for rate limiting
+        semaphore = REGISTRY_SEMAPHORES.get(registry)
+
+        best_same_tag, best_same_ver, best_any_tag, best_any_ver = await find_best_tags_for_same_major(
+            session, registry, repository, current_tag, semaphore, entry, docker_ignore_by_id
         )
 
-    current_ver = parse_semver_from_tag(current_tag)
-    major_available = None
-    if current_ver and best_any_ver and best_any_ver.major > current_ver.major:
-        print(
-            f"  [INFO] New major available in {repository}: {best_any_tag} "
-            f"(current major {current_ver.major}, new major {best_any_ver.major})"
-        )
-        major_available = {
-            "id": entry["id"],
-            "current": current_tag,
-            "available": best_any_tag,
-            "current_major": current_ver.major,
-            "new_major": best_any_ver.major,
-        }
+        current_ver = parse_semver_from_tag(current_tag)
+        major_available = None
+        if current_ver and best_any_ver and best_any_ver.major > current_ver.major:
+            # Check if the best_any_tag matches versionPattern (should be ignored, using pre-compiled regex)
+            should_skip_major = False
+            entry_id = entry.get("id")
+            if docker_ignore_by_id and entry_id and entry_id in docker_ignore_by_id:
+                ignore_rule = docker_ignore_by_id[entry_id]
+                if "_compiled_version_pattern" in ignore_rule:
+                    if ignore_rule["_compiled_version_pattern"].match(best_any_tag):
+                        print(
+                            f"  [INFO] Skipping major upgrade report: {best_any_tag} "
+                            f"matches versionPattern {ignore_rule['versionPattern']}"
+                        )
+                        should_skip_major = True
 
-    if not best_same_tag or not best_same_ver or current_ver is None:
-        print("  [INFO] No suitable same-major update found, skipping")
-        return False, None, None, major_available
+            if not should_skip_major:
+                print(
+                    f"  [INFO] New major available in {repository}: {best_any_tag} "
+                    f"(current major {current_ver.major}, new major {best_any_ver.major})"
+                )
+                major_available = {
+                    "id": entry["id"],
+                    "current": current_tag,
+                    "available": best_any_tag,
+                    "current_major": current_ver.major,
+                    "new_major": best_any_ver.major,
+                }
 
-    if best_same_ver <= current_ver:
-        print("  -> already at latest version for this major")
-        return False, None, None, major_available
-
-    new_image = f"{image_name}:{best_same_tag}"
-    print(f"  -> updating image to {new_image}")
-
-    if dry_run:
-        return True, image_str, new_image, major_available
-
-    # Thread-safe file write
-    with FILE_WRITE_LOCK:
-        text = file_path.read_text(encoding="utf-8")
-        new_text, count = replace_yaml_scalar(text, "image", image_str, new_image)
-        if count == 0:
-            print(f"  [WARN] Could not replace image '{image_str}' in {file_path}")
+        if not best_same_tag or not best_same_ver or current_ver is None:
+            print("  [INFO] No suitable same-major update found, skipping")
             return False, None, None, major_available
-        file_path.write_text(new_text, encoding="utf-8")
 
-    return True, image_str, new_image, major_available
+        if best_same_ver <= current_ver:
+            print("  -> already at latest version for this major")
+            return False, None, None, major_available
+
+        new_image = f"{image_name}:{best_same_tag}"
+        print(f"  -> updating image to {new_image}")
+
+        if dry_run:
+            return True, image_str, new_image, major_available
+
+        # Async file write with lock
+        async with FILE_WRITE_LOCK:
+            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+                text = await f.read()
+            new_text, count = replace_yaml_scalar(text, "image", image_str, new_image)
+            if count == 0:
+                print(f"  [WARN] Could not replace image '{image_str}' in {file_path}")
+                return False, None, None, major_available
+            async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
+                await f.write(new_text)
+
+        return True, image_str, new_image, major_available
+    except Exception as e:
+        print(f"  [ERROR] Exception in update_single_docker_image for {entry.get('id', 'unknown')}: {type(e).__name__}: {e}")
+        print(f"  [ERROR] Traceback: {traceback.format_exc()}")
+        raise
 
 
-def update_docker_images(config, ignore_config, dry_run: bool):
+async def update_docker_images(session: aiohttp.ClientSession, config: dict, docker_ignore_by_id: Dict[str, dict], dry_run: bool) -> Tuple[Set[str], List[dict], List[dict]]:
+    """Update all Docker images concurrently."""
     changed_files = set()
-    docker_changes = []  # list of dicts: {id, file, from, to}
-    major_updates = []  # list of major version updates available
+    docker_changes = []
+    major_updates = []
 
     entries = config.get("dockerImages", [])
 
     if not entries:
         return changed_files, docker_changes, major_updates
 
-    # Process images concurrently (max 10 workers to avoid overwhelming APIs)
-    max_workers = min(10, len(entries))
+    # Process images concurrently using asyncio.gather
+    tasks = [update_single_docker_image(session, entry, docker_ignore_by_id, dry_run) for entry in entries]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_entry = {
-            executor.submit(update_single_docker_image, entry, ignore_config, dry_run): entry
-            for entry in entries
-        }
-
-        # Collect results as they complete
-        for future in as_completed(future_to_entry):
-            entry = future_to_entry[future]
-            try:
-                changed, old, new, major_available = future.result()
-                if changed:
-                    changed_files.add(str(entry["file"]))
-                    docker_changes.append(
-                        {
-                            "id": entry["id"],
-                            "file": entry["file"],
-                            "from": old,
-                            "to": new,
-                        }
-                    )
-                if major_available:
-                    major_updates.append(major_available)
-            except Exception as e:
-                print(f"  [ERROR] Failed to process {entry['id']}: {e}")
+    # Process results
+    for idx, result in enumerate(results):
+        if isinstance(result, Exception):
+            # Exception was already logged in update_single_docker_image with full details
+            # This is just a final note that processing failed for this entry
+            print(f"  [ERROR] Skipping {entries[idx]['id']} due to exception (see details above)")
+        else:
+            changed, old, new, major_available = result
+            if changed:
+                changed_files.add(str(entries[idx]["file"]))
+                docker_changes.append(
+                    {
+                        "id": entries[idx]["id"],
+                        "file": entries[idx]["file"],
+                        "from": old,
+                        "to": new,
+                    }
+                )
+            if major_available:
+                major_updates.append(major_available)
 
     return changed_files, docker_changes, major_updates
 
@@ -1132,7 +1284,7 @@ def update_docker_images(config, ignore_config, dry_run: bool):
 # ----------------- REPORT -----------------
 
 
-def write_report(helm_changes, docker_changes, major_updates):
+async def write_report(helm_changes: List[dict], docker_changes: List[dict], major_updates: List[dict]):
     """
     Write a human-readable summary to .update-report.txt.
     """
@@ -1178,13 +1330,15 @@ def write_report(helm_changes, docker_changes, major_updates):
             )
         lines.append("")
 
-    REPORT_PATH.write_text("\n".join(lines), encoding="utf-8")
+    async with aiofiles.open(REPORT_PATH, "w", encoding="utf-8") as f:
+        await f.write("\n".join(lines))
 
 
 # ----------------- MAIN -----------------
 
 
-def main():
+async def async_main():
+    """Main async function."""
     start_time = time.time()
 
     if not CONFIG_PATH.exists():
@@ -1193,25 +1347,23 @@ def main():
 
     dry_run = "--dry-run" in sys.argv
 
-    config = load_yaml(CONFIG_PATH)
+    config = await load_yaml(CONFIG_PATH)
     ignore_config = config.get("ignore")
 
-    # Show cache info
-    if CACHE_SESSION.cache:
-        try:
-            # Try to get cache size (works for SQLite backend)
-            cache_info = CACHE_SESSION.cache.responses.count()
-            print(f"Cache initialized: {cache_info} cached entries")
-        except (AttributeError, TypeError):
-            # Filesystem backend doesn't have count(), just confirm it exists
-            print(f"Cache initialized: filesystem backend at .registry_cache/")
+    # Build optimized ignore lookups with pre-compiled regex patterns
+    docker_ignore_by_id, helm_ignore_by_name = build_ignore_lookups(ignore_config)
 
-    if ignore_config:
-        print("Ignore rules loaded:")
-        if ignore_config.get("dockerImages"):
-            print(f"  Docker images: {len(ignore_config.get('dockerImages', []))} rule(s)")
-        if ignore_config.get("helmCharts"):
-            print(f"  Helm charts: {len(ignore_config.get('helmCharts', []))} rule(s)")
+    # Initialize registry-specific semaphores
+    global REGISTRY_SEMAPHORES, HELM_SEMAPHORE
+
+    # Initialize Helm chart semaphore for concurrency control
+    HELM_SEMAPHORE = asyncio.Semaphore(HELM_CONCURRENCY_LIMIT)
+
+    # Initialize Docker registry semaphores
+    REGISTRY_SEMAPHORES = {
+        registry: asyncio.Semaphore(limit)
+        for registry, limit in REGISTRY_LIMITS.items()
+    }
 
     # Check Docker Hub authentication and adjust limits
     import os
@@ -1223,43 +1375,57 @@ def main():
         print("Docker Hub: Authenticated (200 req/6h rate limit)")
         # Increase Docker Hub concurrency limit when authenticated
         REGISTRY_LIMITS['dockerhub'] = 5
-        # Recreate semaphore with new limit
-        REGISTRY_SEMAPHORES['dockerhub'] = Semaphore(5)
+        REGISTRY_SEMAPHORES['dockerhub'] = asyncio.Semaphore(5)
     else:
         print("Docker Hub: Anonymous (100 req/6h rate limit)")
         print("  Tip: Set DOCKERHUB_USERNAME and DOCKERHUB_TOKEN to increase limits")
 
-    print(f"Running with dry_run={dry_run}")
-    print(f"Concurrent processing: enabled (max 10 workers)")
-    print(f"Per-registry rate limiting: Docker Hub ({REGISTRY_LIMITS['dockerhub']} concurrent), "
-          f"ghcr.io ({REGISTRY_LIMITS['ghcr.io']}), "
-          f"quay.io ({REGISTRY_LIMITS['quay.io']}), "
-          f"gcr.io ({REGISTRY_LIMITS['gcr.io']})")
+    if ignore_config:
+        print("Ignore rules loaded:")
+        docker_ignore_rules = ignore_config.get("dockerImages", [])
+        if docker_ignore_rules:
+            print(f"  Docker images: {len(docker_ignore_rules)} rule(s)")
+        if ignore_config.get("helmCharts"):
+            print(f"  Helm charts: {len(ignore_config.get('helmCharts', []))} rule(s)")
+
+    if dry_run:
+        print("Running in dry-run mode (no changes will be made)")
+
     changed_files = set()
 
-    # Update Helm charts
-    helm_start = time.time()
-    helm_changed_files, helm_changes = update_helm_charts(config, ignore_config, dry_run=dry_run)
-    helm_duration = time.time() - helm_start
+    # Create session with connection limits to avoid overwhelming network
+    connector = aiohttp.TCPConnector(
+        limit=30,  # Total concurrent connections
+        limit_per_host=10,  # Max concurrent connections per host
+        ttl_dns_cache=300  # Cache DNS for 5 minutes
+    )
+    async with aiohttp.ClientSession(connector=connector) as session:
+        # Run Helm and Docker updates sequentially to reduce network stress
+        # Parallel execution caused too many timeouts requiring retries that
+        # negated the performance benefit. Sequential is more reliable.
+        helm_start = time.time()
+        helm_changed_files, helm_changes = await update_helm_charts(session, config, helm_ignore_by_name, dry_run=dry_run)
+        helm_duration = time.time() - helm_start
 
-    # Update Docker images
-    docker_start = time.time()
-    docker_changed_files, docker_changes, major_updates = update_docker_images(config, ignore_config, dry_run=dry_run)
-    docker_duration = time.time() - docker_start
+        docker_start = time.time()
+        docker_changed_files, docker_changes, major_updates = await update_docker_images(session, config, docker_ignore_by_id, dry_run=dry_run)
+        docker_duration = time.time() - docker_start
 
-    changed_files |= helm_changed_files
-    changed_files |= docker_changed_files
+        changed_files |= helm_changed_files
+        changed_files |= docker_changed_files
 
     # Write report (for CI/Telegram, etc.)
     if not dry_run:
-        write_report(helm_changes, docker_changes, major_updates)
+        await write_report(helm_changes, docker_changes, major_updates)
 
     # Performance summary
     total_duration = time.time() - start_time
+    total_helm = len(config.get('argoApps', [])) + len(config.get('kustomizeHelmCharts', [])) + len(config.get('chartDependencies', []))
+    total_docker = len(config.get('dockerImages', []))
     print(f"\n{'='*60}")
     print(f"Performance Summary:")
-    print(f"  Helm charts: {helm_duration:.2f}s ({len(config.get('argoApps', [])) + len(config.get('kustomizeHelmCharts', [])) + len(config.get('chartDependencies', []))} charts)")
-    print(f"  Docker images: {docker_duration:.2f}s ({len(config.get('dockerImages', []))} images)")
+    print(f"  Helm charts: {helm_duration:.2f}s ({total_helm} charts)")
+    print(f"  Docker images: {docker_duration:.2f}s ({total_docker} images)")
     print(f"  Total time: {total_duration:.2f}s")
     print(f"{'='*60}")
 
@@ -1271,6 +1437,11 @@ def main():
         print("\nNo changes detected.")
 
     return 0
+
+
+def main():
+    """Entry point that runs the async main function."""
+    return asyncio.run(async_main())
 
 
 if __name__ == "__main__":
