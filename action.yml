@@ -217,12 +217,13 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         DOCKERHUB_USERNAME: ${{ inputs.dockerhub-username }}
         DOCKERHUB_TOKEN: ${{ inputs.dockerhub-token }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         echo "Running version updater..."
         if [ "$DRY_RUN" = "true" ]; then
-          python "${{ github.action_path }}/.github/scripts/update-versions.py" --dry-run
+          python "$ACTION_PATH/.github/scripts/update-versions.py" --dry-run
         else
-          python "${{ github.action_path }}/.github/scripts/update-versions.py"
+          python "$ACTION_PATH/.github/scripts/update-versions.py"
         fi
 
     - name: Check for changes
