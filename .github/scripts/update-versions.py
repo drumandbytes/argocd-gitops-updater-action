@@ -720,7 +720,7 @@ async def update_helm_charts(session: aiohttp.ClientSession, config: dict, helm_
     return changed_files, helm_changes
 
 
-# ----------------- DOCKER STUFF (Docker Hub, semver-aware) -----------------
+# ----------------- DOCKER STUFF (multi-registry, semver-aware) -----------------
 
 
 def parse_image(image_str: str) -> tuple[str, str]:
@@ -900,7 +900,7 @@ async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> lis
     For public images, works without authentication.
     For private images or higher rate limits, set GITHUB_TOKEN environment variable.
 
-    Note: GITHUB_TOKEN must be base64 encoded for ghcr.io authentication.
+    The token is automatically base64-encoded by this function.
     """
     import base64
     import os
@@ -1081,7 +1081,7 @@ async def find_best_tags_for_same_major(session: aiohttp.ClientSession, registry
         current_tag: The current tag to compare against
         semaphore: Optional semaphore for rate limiting
         entry: Docker image entry (for ignore pattern matching)
-        ignore_config: Ignore configuration (for version pattern filtering)
+        docker_ignore_by_id: Pre-built lookup dict for version pattern filtering
 
     Returns:
         Tuple of (best_same_tag, best_same_ver, best_any_tag, best_any_ver)
