@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Only run if PR was merged (not just closed)
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for tags
+
+      - name: Get latest tag
+        id: get_latest_tag
+        run: |
+          # Get the latest semver tag
+          LATEST_TAG=$(git tag -l 'v*.*.*' | sort -V | tail -n1)
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="v0.0.0"
+          fi
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "Latest tag: $LATEST_TAG"
+
+      - name: Determine version bump
+        id: bump_version
+        run: |
+          LATEST_TAG="${{ steps.get_latest_tag.outputs.latest_tag }}"
+
+          # Remove 'v' prefix for processing
+          VERSION=${LATEST_TAG#v}
+
+          # Split into major.minor.patch
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+
+          # Check PR labels for version bump type
+          LABELS='${{ toJson(github.event.pull_request.labels.*.name) }}'
+
+          if echo "$LABELS" | grep -q '"release:major"'; then
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+            BUMP_TYPE="major"
+          elif echo "$LABELS" | grep -q '"release:minor"'; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+            BUMP_TYPE="minor"
+          elif echo "$LABELS" | grep -q '"release:patch"'; then
+            PATCH=$((PATCH + 1))
+            BUMP_TYPE="patch"
+          else
+            echo "No release label found (release:major, release:minor, release:patch)"
+            echo "Skipping release"
+            echo "skip_release=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          MAJOR_TAG="v${MAJOR}"
+
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "major_tag=$MAJOR_TAG" >> $GITHUB_OUTPUT
+          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          echo "skip_release=false" >> $GITHUB_OUTPUT
+
+          echo "Bump type: $BUMP_TYPE"
+          echo "New version: $NEW_VERSION"
+          echo "Major tag: $MAJOR_TAG"
+
+      - name: Extract changelog
+        if: steps.bump_version.outputs.skip_release != 'true'
+        id: changelog
+        run: |
+          # Extract [Unreleased] section from CHANGELOG.md
+          # This gets everything between [Unreleased] and the next ## heading
+          CHANGELOG=$(awk '/^## \[Unreleased\]/{flag=1; next} /^## \[/{flag=0} flag' CHANGELOG.md)
+
+          if [ -z "$CHANGELOG" ]; then
+            # Fallback to PR body if no unreleased section
+            CHANGELOG="${{ github.event.pull_request.body }}"
+          fi
+
+          # Write to file to handle multiline
+          echo "$CHANGELOG" > /tmp/changelog.md
+
+          # Also create a summary
+          echo "Changelog extracted successfully"
+
+      - name: Update CHANGELOG.md
+        if: steps.bump_version.outputs.skip_release != 'true'
+        run: |
+          NEW_VERSION="${{ steps.bump_version.outputs.new_version }}"
+          TODAY=$(date +%Y-%m-%d)
+
+          # Replace [Unreleased] with the new version and date, add new [Unreleased] section
+          sed -i "s/## \[Unreleased\]/## [Unreleased]\n\n## [${NEW_VERSION#v}] - $TODAY/" CHANGELOG.md
+
+          # Commit the changelog update
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "chore: update CHANGELOG for ${NEW_VERSION}" || echo "No changes to commit"
+          git push
+
+      - name: Create Release
+        if: steps.bump_version.outputs.skip_release != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.bump_version.outputs.new_version }}
+          name: ${{ steps.bump_version.outputs.new_version }}
+          body_path: /tmp/changelog.md
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+
+      - name: Update major version tag
+        if: steps.bump_version.outputs.skip_release != 'true'
+        run: |
+          NEW_VERSION="${{ steps.bump_version.outputs.new_version }}"
+          MAJOR_TAG="${{ steps.bump_version.outputs.major_tag }}"
+
+          # Delete the old major tag (locally and remotely)
+          git tag -d "$MAJOR_TAG" 2>/dev/null || true
+          git push origin ":refs/tags/$MAJOR_TAG" 2>/dev/null || true
+
+          # Create new major tag pointing to the same commit as the new version
+          git tag "$MAJOR_TAG" "$NEW_VERSION"
+          git push origin "$MAJOR_TAG"
+
+          echo "Updated $MAJOR_TAG to point to $NEW_VERSION"
+
+      - name: Summary
+        if: steps.bump_version.outputs.skip_release != 'true'
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ steps.bump_version.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Major Tag**: ${{ steps.bump_version.outputs.major_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Bump Type**: ${{ steps.bump_version.outputs.bump_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The action is now available as:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`drumandbytes/argocd-gitops-updater-action@${{ steps.bump_version.outputs.new_version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`drumandbytes/argocd-gitops-updater-action@${{ steps.bump_version.outputs.major_tag }}\`" >> $GITHUB_STEP_SUMMARY

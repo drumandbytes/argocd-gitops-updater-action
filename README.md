@@ -1,6 +1,7 @@
 # ArgoCD GitOps Updater Action
 
 [![GitHub marketplace](https://img.shields.io/badge/marketplace-container--helm--version--updater-blue?logo=github)](https://github.com/marketplace/actions/container-helm-version-updater)
+[![CI](https://github.com/drumandbytes/argocd-gitops-updater-action/actions/workflows/ci.yml/badge.svg)](https://github.com/drumandbytes/argocd-gitops-updater-action/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 > GitHub Action for automated Helm chart and Docker image version updates. GitOps-friendly with ArgoCD/Kustomize support, auto-discovery, semantic versioning, and notifications (Slack/Teams/Discord/Telegram)
@@ -39,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: drumandbytes/argocd-gitops-updater-action@v1
+      - uses: drumandbytes/argocd-gitops-updater-action@v2
         with:
           config-path: '.update-config.yaml'
           create-pr: true
@@ -48,7 +49,7 @@ jobs:
 ### With Auto-Discovery
 
 ```yaml
-- uses: drumandbytes/argocd-gitops-updater-action@v1
+- uses: drumandbytes/argocd-gitops-updater-action@v2
   with:
     auto-discover: true
     create-pr: true
@@ -58,7 +59,7 @@ jobs:
 ### With Docker Hub Authentication
 
 ```yaml
-- uses: drumandbytes/argocd-gitops-updater-action@v1
+- uses: drumandbytes/argocd-gitops-updater-action@v2
   with:
     config-path: '.update-config.yaml'
     dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -69,7 +70,7 @@ jobs:
 ### With Notifications
 
 ```yaml
-- uses: drumandbytes/argocd-gitops-updater-action@v1
+- uses: drumandbytes/argocd-gitops-updater-action@v2
   with:
     config-path: '.update-config.yaml'
     create-pr: true
@@ -145,7 +146,7 @@ ignore:
 **Don't want to create the config manually?** Use auto-discovery:
 
 ```yaml
-- uses: drumandbytes/argocd-gitops-updater-action@v1
+- uses: drumandbytes/argocd-gitops-updater-action@v2
   with:
     auto-discover: true
     create-pr: true
@@ -218,7 +219,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: drumandbytes/argocd-gitops-updater-action@v1
+      - uses: drumandbytes/argocd-gitops-updater-action@v2
         with:
           auto-discover: true
           create-pr: true
@@ -236,7 +237,7 @@ This will:
 Test without making changes:
 
 ```yaml
-- uses: drumandbytes/argocd-gitops-updater-action@v1
+- uses: drumandbytes/argocd-gitops-updater-action@v2
   with:
     config-path: '.update-config.yaml'
     dry-run: true
@@ -247,7 +248,7 @@ Test without making changes:
 **Recommended:** Use the action's built-in notification support for Slack, Discord, Microsoft Teams, or Telegram:
 
 ```yaml
-- uses: drumandbytes/argocd-gitops-updater-action@v1
+- uses: drumandbytes/argocd-gitops-updater-action@v2
   with:
     config-path: '.update-config.yaml'
     create-pr: true
@@ -269,7 +270,7 @@ See [Notification Examples](#-notification-examples) section below for detailed 
 ### Using Outputs
 
 ```yaml
-- uses: drumandbytes/argocd-gitops-updater-action@v1
+- uses: drumandbytes/argocd-gitops-updater-action@v2
   id: updater
   with:
     config-path: '.update-config.yaml'
@@ -301,7 +302,7 @@ Increase rate limits from 100 to 200 requests per 6 hours:
 3. Use in workflow:
 
 ```yaml
-- uses: drumandbytes/argocd-gitops-updater-action@v1
+- uses: drumandbytes/argocd-gitops-updater-action@v2
   with:
     dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
     dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -312,7 +313,7 @@ Increase rate limits from 100 to 200 requests per 6 hours:
 The action automatically uses `${{ github.token }}` for ghcr.io authentication. For custom tokens:
 
 ```yaml
-- uses: drumandbytes/argocd-gitops-updater-action@v1
+- uses: drumandbytes/argocd-gitops-updater-action@v2
   with:
     github-token: ${{ secrets.CUSTOM_GITHUB_TOKEN }}
 ```
@@ -489,7 +490,12 @@ This is by design. The action only updates within the same major version for saf
 
 ## 🤝 Contributing
 
-Contributions welcome! Please feel free to submit issues or pull requests.
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and PR guidelines.
+
+The codebase includes:
+- 111 unit tests with pytest
+- ruff for linting and formatting
+- CI workflow for automated testing
 
 ## 📄 License
 
@@ -498,7 +504,8 @@ MIT License - see [LICENSE](LICENSE) file for details
 ## 🔗 Links
 
 - [Issue Tracker](https://github.com/drumandbytes/argocd-gitops-updater-action/issues)
-- [Changelog](https://github.com/drumandbytes/argocd-gitops-updater-action/releases)
+- [Changelog](CHANGELOG.md)
+- [Contributing Guide](CONTRIBUTING.md)
 
 ## ⭐ Show Your Support
 

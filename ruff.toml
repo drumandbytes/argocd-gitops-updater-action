@@ -1,0 +1,66 @@
+# Ruff configuration for code quality
+# https://docs.astral.sh/ruff/configuration/
+
+# Target Python 3.11+
+target-version = "py311"
+
+# Line length to match common standards
+line-length = 120
+
+# Exclude generated and test files from some checks
+exclude = [
+    ".git",
+    ".pytest_cache",
+    "__pycache__",
+    ".venv",
+    "venv",
+]
+
+[lint]
+# Enable common rule sets
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "SIM",    # flake8-simplify
+]
+
+# Ignore specific rules that are too strict for this codebase
+ignore = [
+    "E501",   # Line too long (handled by formatter)
+    "B008",   # Do not perform function calls in argument defaults
+    "SIM102", # Nested if statements (sometimes clearer for complex conditions)
+    "SIM103", # Return condition directly (sometimes clearer with explicit if/return)
+    "SIM105", # Use contextlib.suppress (try/except/pass is often clearer)
+    "SIM108", # Use ternary operator (readability preference)
+    "UP007",  # Use X | Y for type unions (keep Optional for clarity)
+]
+
+# Allow autofix for all enabled rules
+fixable = ["ALL"]
+unfixable = []
+
+[lint.per-file-ignores]
+# Tests can have more relaxed rules
+"tests/*" = [
+    "B011",   # assert False is OK in tests
+    "SIM",    # simplify rules less important in tests
+]
+
+[lint.isort]
+# Sort imports in a way that's compatible with the codebase
+known-first-party = ["update_versions", "discover_resources"]
+
+[format]
+# Use double quotes for strings
+quote-style = "double"
+
+# Indent with spaces
+indent-style = "space"
+
+# Unix-style line endings
+line-ending = "lf"

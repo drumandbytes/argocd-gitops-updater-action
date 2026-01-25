@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install ruff
+
+      - name: Run Ruff linter
+        run: |
+          ruff check .github/scripts/
+
+      - name: Run Ruff formatter check
+        run: |
+          ruff format --check .github/scripts/
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install pytest pytest-asyncio aiohttp aiofiles pyyaml packaging
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v
+
+  validate-action:
+    name: Validate Action
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate action.yml syntax
+        run: |
+          python -c "import yaml; yaml.safe_load(open('action.yml'))"
+          echo "action.yml is valid YAML"
+
+      - name: Check required files exist
+        run: |
+          test -f action.yml
+          test -f .github/scripts/update-versions.py
+          test -f .github/scripts/discover-resources.py
+          echo "All required files exist"
