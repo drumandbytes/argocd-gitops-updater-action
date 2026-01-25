@@ -202,8 +202,10 @@ runs:
     - name: Stop if discovery PR was created
       if: steps.discovery-pr.outputs.pull-request-number
       shell: bash
+      env:
+        DISCOVERY_PR_URL: ${{ steps.discovery-pr.outputs.pull-request-url }}
       run: |
-        echo "::notice::Auto-discovery PR created: ${{ steps.discovery-pr.outputs.pull-request-url }}"
+        echo "::notice::Auto-discovery PR created: $DISCOVERY_PR_URL"
         echo "Stopping workflow to allow review of discovered resources before version updates."
         exit 0
 
