@@ -1,0 +1,15 @@
+# CODEOWNERS - defines who must review changes to specific files
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything in the repo
+* @drumandbytes
+
+# Action core
+/.github/scripts/ @drumandbytes
+/action.yml @drumandbytes
+
+# CI/CD and release automation
+/.github/workflows/ @drumandbytes
+
+# Tests
+/tests/ @drumandbytes
