@@ -29,6 +29,16 @@ Brief description of the changes.
 - [ ] I have updated the README if needed
 - [ ] I have updated code comments/docstrings if needed
 
+## Release
+
+Add one of these labels to trigger an automated release when this PR is merged:
+
+- `release:major` - Breaking changes (v1.0.0 → v2.0.0)
+- `release:minor` - New features (v1.0.0 → v1.1.0)
+- `release:patch` - Bug fixes (v1.0.0 → v1.0.1)
+
+If no release label is added, no release will be created.
+
 ## Checklist
 
 - [ ] My code follows the project's style guidelines
