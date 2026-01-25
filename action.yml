@@ -152,9 +152,10 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         DOCKERHUB_USERNAME: ${{ inputs.dockerhub-username }}
         DOCKERHUB_TOKEN: ${{ inputs.dockerhub-token }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         echo "Auto-discovering resources..."
-        python "${{ github.action_path }}/.github/scripts/discover-resources.py"
+        python "$ACTION_PATH/.github/scripts/discover-resources.py"
 
     - name: Check for discovery changes
       id: discovery-changes
