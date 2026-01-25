@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Automated release workflow with label-based version bumping (release:major/minor/patch)
+- Changelog extraction from [Unreleased] section for release notes
+- Floating major version tag management (v1, v2, etc.)
 - CI workflow for linting (ruff) and testing (pytest)
 - Unit tests for version parsing, ignore rules, YAML replacement, discovery (64 tests)
 - Edge case tests for graceful error handling (47 tests)
