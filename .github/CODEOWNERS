@@ -2,14 +2,14 @@
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
 # Default owner for everything in the repo
-* @drumandbytes
+* @justmaris
 
 # Action core
-/.github/scripts/ @drumandbytes
-/action.yml @drumandbytes
+/.github/scripts/ @justmaris
+/action.yml @justmaris
 
 # CI/CD and release automation
-/.github/workflows/ @drumandbytes
+/.github/workflows/ @justmaris
 
 # Tests
-/tests/ @drumandbytes
+/tests/ @justmaris

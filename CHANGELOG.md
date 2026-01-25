@@ -28,6 +28,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Invalid regex patterns in ignore rules now warn and skip instead of crashing
 - Fixed inaccurate comments (multi-registry support, GITHUB_TOKEN encoding, docstring params)
 
+## [2.0.0] - 2025-01-25
+
+### BREAKING CHANGES
+- Removed `cache` input parameter - caching system removed as async provides sufficient performance
+- If you were using `cache: true`, simply remove this line from your workflow
+
+### Added
+- Async/await refactoring for concurrent API requests
+- Pre-compiled regex patterns for better performance
+- O(1) ignore rule lookups
+- Improved error messages showing exception types
+
+### Fixed
+- Fixed versionPattern filtering for Docker images
+- Fixed variant matching (no-variant vs with-variant)
+- Fixed major version showing in reports when filtered by versionPattern
+
+### Changed
+- ~40-60s typical runtime for 10-15 resources
+- Reduced Helm concurrency (10→5) for better stability
+- Smart per-registry rate limiting
+- Upgraded to Python 3.14
+- Dependencies: aiohttp, aiofiles, pyyaml, packaging
+- Removed: aiohttp-client-cache, aiosqlite
+
+### Documentation
+- Updated all docs to reflect async-only implementation
+- Removed outdated cache documentation
+- Realistic performance expectations
+
 ## [1.3.0] - 2025-01-25
 
 ### Changed
