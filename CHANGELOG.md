@@ -8,11 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- CI workflow for linting and testing
-- Unit tests for core functionality
+- CI workflow for linting (ruff) and testing (pytest)
+- Unit tests for version parsing, ignore rules, YAML replacement, discovery (64 tests)
+- Edge case tests for graceful error handling (47 tests)
 - CONTRIBUTING.md with development guidelines
 - GitHub issue and PR templates
+- ruff.toml configuration for code quality
 - This CHANGELOG file
+
+### Changed
+- Modernized type annotations (tuple instead of Tuple, X | None instead of Optional)
+- Complete type hint coverage for all functions
+- Improved code organization with import sorting
+
+### Fixed
+- Invalid regex patterns in ignore rules now warn and skip instead of crashing
+- Fixed inaccurate comments (multi-registry support, GITHUB_TOKEN encoding, docstring params)
 
 ## [1.3.0] - 2025-01-25
 
