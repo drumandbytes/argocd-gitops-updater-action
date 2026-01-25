@@ -19,8 +19,8 @@ REPORT_PATH = Path(".update-report.txt")
 FILE_WRITE_LOCK = asyncio.Lock()
 
 # Helm chart concurrency limit to avoid overwhelming DNS and network
-# Now that Helm and Docker run in parallel (not sequential), we can increase this
-HELM_CONCURRENCY_LIMIT = 10
+# Even though Helm and Docker run sequentially, concurrent Helm requests can still cause issues
+HELM_CONCURRENCY_LIMIT = 5
 
 # Helm chart semaphore for rate limiting (will be initialized in main)
 HELM_SEMAPHORE: Optional[asyncio.Semaphore] = None
@@ -321,10 +321,12 @@ async def get_latest_helm_chart_version(session: aiohttp.ClientSession, repo_url
             except (asyncio.TimeoutError, aiohttp.ClientError) as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                    print(f"  [WARN] Helm chart request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}")
+                    error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                    print(f"  [WARN] Helm chart request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}")
                     await asyncio.sleep(wait_time)
                 else:
-                    print(f"  [ERROR] Helm chart request failed after {max_retries} attempts: {e}")
+                    error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                    print(f"  [ERROR] Helm chart request failed after {max_retries} attempts: {error_msg}")
                     raise
 
     index = yaml.safe_load(content)
@@ -853,10 +855,12 @@ async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> 
             except (asyncio.TimeoutError, aiohttp.ClientError) as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                    print(f"  [WARN] Docker Hub request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}")
+                    error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                    print(f"  [WARN] Docker Hub request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}")
                     await asyncio.sleep(wait_time)
                 else:
-                    print(f"  [ERROR] Docker Hub request failed after {max_retries} attempts: {e}")
+                    error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                    print(f"  [ERROR] Docker Hub request failed after {max_retries} attempts: {error_msg}")
                     raise
 
     return tags
@@ -916,7 +920,8 @@ async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> Lis
                 except (asyncio.TimeoutError, aiohttp.ClientError) as e:
                     if attempt < max_retries - 1:
                         wait_time = 2 ** attempt
-                        print(f"  [WARN] GHCR request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}")
+                        error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                        print(f"  [WARN] GHCR request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}")
                         await asyncio.sleep(wait_time)
                     else:
                         raise
@@ -957,7 +962,8 @@ async def list_quay_tags(session: aiohttp.ClientSession, repository: str) -> Lis
                 except (asyncio.TimeoutError, aiohttp.ClientError) as e:
                     if attempt < max_retries - 1:
                         wait_time = 2 ** attempt
-                        print(f"  [WARN] Quay.io request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}")
+                        error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                        print(f"  [WARN] Quay.io request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}")
                         await asyncio.sleep(wait_time)
                     else:
                         raise
@@ -993,7 +999,8 @@ async def list_gcr_tags(session: aiohttp.ClientSession, repository: str) -> List
             except (asyncio.TimeoutError, aiohttp.ClientError) as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt
-                    print(f"  [WARN] GCR request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}")
+                    error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                    print(f"  [WARN] GCR request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}")
                     await asyncio.sleep(wait_time)
                 else:
                     raise
