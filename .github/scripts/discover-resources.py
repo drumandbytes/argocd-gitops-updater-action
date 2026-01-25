@@ -8,26 +8,25 @@ This async version uses:
 - aiofiles for non-blocking file I/O
 - Concurrent processing for faster discovery
 """
-import sys
-import re
 import asyncio
+import sys
 from pathlib import Path
-from typing import Any, Optional, Tuple, List
+
 import aiofiles
 import yaml
 
 
-async def load_yaml_safe(path: Path) -> Optional[dict]:
+async def load_yaml_safe(path: Path) -> dict | None:
     """Load YAML file asynchronously, return None if it fails or isn't valid YAML."""
     try:
-        async with aiofiles.open(path, "r", encoding="utf-8") as f:
+        async with aiofiles.open(path, encoding="utf-8") as f:
             content = await f.read()
             return yaml.safe_load(content)
     except Exception:
         return None
 
 
-def should_ignore_docker_image(entry: dict, ignore_config: Optional[dict]) -> Tuple[bool, Optional[str]]:
+def should_ignore_docker_image(entry: dict, ignore_config: dict | None) -> tuple[bool, str | None]:
     """
     Check if a Docker image should be ignored based on ignore configuration.
     Returns (should_ignore: bool, reason: str)
@@ -49,7 +48,7 @@ def should_ignore_docker_image(entry: dict, ignore_config: Optional[dict]) -> Tu
     return False, None
 
 
-def should_ignore_helm_chart(name: str, ignore_config: Optional[dict]) -> Tuple[bool, Optional[str]]:
+def should_ignore_helm_chart(name: str, ignore_config: dict | None) -> tuple[bool, str | None]:
     """
     Check if a Helm chart should be ignored based on ignore configuration.
     Returns (should_ignore: bool, reason: str)
@@ -67,7 +66,7 @@ def should_ignore_helm_chart(name: str, ignore_config: Optional[dict]) -> Tuple[
     return False, None
 
 
-async def discover_argo_apps(root: Path) -> List[dict]:
+async def discover_argo_apps(root: Path) -> list[dict]:
     """
     Find all Argo CD Application resources with Helm charts.
     Returns list of {name, repoUrl, file}
@@ -83,7 +82,7 @@ async def discover_argo_apps(root: Path) -> List[dict]:
     return sorted(apps, key=lambda x: x["name"])
 
 
-async def process_argo_app_file(yaml_file: Path, root: Path) -> Optional[dict]:
+async def process_argo_app_file(yaml_file: Path, root: Path) -> dict | None:
     """Process a single YAML file to check if it's an Argo CD Application."""
     data = await load_yaml_safe(yaml_file)
     if not data:
@@ -118,7 +117,7 @@ async def process_argo_app_file(yaml_file: Path, root: Path) -> Optional[dict]:
     return None
 
 
-async def discover_kustomize_helm_charts(root: Path) -> List[dict]:
+async def discover_kustomize_helm_charts(root: Path) -> list[dict]:
     """
     Find all kustomization.yaml files with helmCharts entries.
     Returns list of {name, repoUrl, files: []}
@@ -150,7 +149,7 @@ async def discover_kustomize_helm_charts(root: Path) -> List[dict]:
     return sorted(result, key=lambda x: x["name"])
 
 
-async def process_kustomization_file(yaml_file: Path, root: Path) -> List[Tuple[Tuple[str, str], str]]:
+async def process_kustomization_file(yaml_file: Path, root: Path) -> list[tuple[tuple[str, str], str]]:
     """Process a single kustomization.yaml file."""
     data = await load_yaml_safe(yaml_file)
     if not data:
@@ -171,7 +170,7 @@ async def process_kustomization_file(yaml_file: Path, root: Path) -> List[Tuple[
     return results
 
 
-async def discover_chart_dependencies(root: Path) -> List[dict]:
+async def discover_chart_dependencies(root: Path) -> list[dict]:
     """
     Find all Chart.yaml files with dependencies.
     Returns list of {name, repoUrl, files: []}
@@ -203,7 +202,7 @@ async def discover_chart_dependencies(root: Path) -> List[dict]:
     return sorted(result, key=lambda x: x["name"])
 
 
-async def process_chart_file(yaml_file: Path, root: Path) -> List[Tuple[Tuple[str, str], str]]:
+async def process_chart_file(yaml_file: Path, root: Path) -> list[tuple[tuple[str, str], str]]:
     """Process a single Chart.yaml file."""
     data = await load_yaml_safe(yaml_file)
     if not data:
@@ -227,7 +226,7 @@ async def process_chart_file(yaml_file: Path, root: Path) -> List[Tuple[Tuple[st
     return results
 
 
-def parse_image(image_str: str) -> Tuple[str, str, str]:
+def parse_image(image_str: str) -> tuple[str, str, str]:
     """
     Parse an image string into (registry, repository, tag).
 
@@ -262,7 +261,7 @@ def parse_image(image_str: str) -> Tuple[str, str, str]:
     return registry, repository, tag
 
 
-def find_container_images_in_yaml(data: dict, current_path: Optional[list] = None) -> List[Tuple[list, str]]:
+def find_container_images_in_yaml(data: dict, current_path: list | None = None) -> list[tuple[list, str]]:
     """
     Recursively find all container image references in a Kubernetes manifest.
     Returns list of (yaml_path, image_string).
@@ -298,7 +297,7 @@ def find_container_images_in_yaml(data: dict, current_path: Optional[list] = Non
     return results
 
 
-async def discover_docker_images(root: Path) -> List[dict]:
+async def discover_docker_images(root: Path) -> list[dict]:
     """
     Find all Docker images in Kubernetes manifests.
     Returns list of {id, registry, repository, file, yamlPath}
@@ -331,7 +330,7 @@ async def discover_docker_images(root: Path) -> List[dict]:
     return sorted(images_map.values(), key=lambda x: x["id"])
 
 
-async def process_k8s_manifest_file(yaml_file: Path, root: Path, resource_types: set) -> List[Tuple[Tuple[str, str], dict]]:
+async def process_k8s_manifest_file(yaml_file: Path, root: Path, resource_types: set) -> list[tuple[tuple[str, str], dict]]:
     """Process a single Kubernetes manifest file."""
     data = await load_yaml_safe(yaml_file)
     if not data:
@@ -512,8 +511,13 @@ def merge_configs(existing: dict, discovered: dict) -> dict:
     return merged
 
 
-async def async_main():
-    """Async main function."""
+async def async_main() -> int:
+    """
+    Async main function that discovers resources and generates config.
+
+    Returns:
+        Exit code (0 for success)
+    """
     root = Path.cwd()
     config_path = root / ".update-config.yaml"
 
@@ -523,14 +527,14 @@ async def async_main():
 
     # Load existing config if it exists
     if config_path.exists():
-        print(f"Merging with existing configuration...")
-        async with aiofiles.open(config_path, "r", encoding="utf-8") as f:
+        print("Merging with existing configuration...")
+        async with aiofiles.open(config_path, encoding="utf-8") as f:
             content = await f.read()
             existing = yaml.safe_load(content) or {}
 
         final_config = merge_configs(existing, discovered)
     else:
-        print(f"Creating new configuration...")
+        print("Creating new configuration...")
         final_config = discovered
 
     # Write the config
@@ -538,8 +542,8 @@ async def async_main():
     async with aiofiles.open(config_path, "w", encoding="utf-8") as f:
         await f.write(yaml.dump(final_config, default_flow_style=False, sort_keys=False, allow_unicode=True))
 
-    print(f"Configuration updated successfully!")
-    print(f"Summary:")
+    print("Configuration updated successfully!")
+    print("Summary:")
     print(f"  - Argo CD Applications: {len(final_config.get('argoApps', []))}")
     print(f"  - Kustomize Helm Charts: {len(final_config.get('kustomizeHelmCharts', []))}")
     print(f"  - Chart.yaml Dependencies: {len(final_config.get('chartDependencies', []))}")
@@ -548,8 +552,13 @@ async def async_main():
     return 0
 
 
-def main():
-    """Entry point that runs the async main function."""
+def main() -> int:
+    """
+    Entry point that runs the async main function.
+
+    Returns:
+        Exit code (0 for success)
+    """
     return asyncio.run(async_main())
 
 

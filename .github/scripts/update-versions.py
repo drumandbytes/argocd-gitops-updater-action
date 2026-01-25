@@ -1,16 +1,20 @@
 #!/usr/bin/env python
-import sys
-from pathlib import Path
-import re
-import time
 import asyncio
+import re
+import sys
+import time
 import traceback
-from typing import Optional, Tuple, List, Set, Dict, Any
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+from typing import TypeVar
 
-import aiohttp
 import aiofiles
+import aiohttp
 import yaml
-from packaging.version import Version, InvalidVersion
+from packaging.version import InvalidVersion, Version
+
+# Type variable for generic return type in retry_on_rate_limit
+T = TypeVar('T')
 
 CONFIG_PATH = Path(".update-config.yaml")
 REPORT_PATH = Path(".update-report.txt")
@@ -23,7 +27,7 @@ FILE_WRITE_LOCK = asyncio.Lock()
 HELM_CONCURRENCY_LIMIT = 5
 
 # Helm chart semaphore for rate limiting (will be initialized in main)
-HELM_SEMAPHORE: Optional[asyncio.Semaphore] = None
+HELM_SEMAPHORE: asyncio.Semaphore | None = None
 
 # Per-registry concurrency limits to avoid rate limiting
 # These limits are conservative to stay well below API rate limits
@@ -36,7 +40,7 @@ REGISTRY_LIMITS = {
 DEFAULT_REGISTRY_LIMIT = 5
 
 # Registry-specific semaphores for rate limiting (will be initialized in main)
-REGISTRY_SEMAPHORES: Dict[str, asyncio.Semaphore] = {}
+REGISTRY_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
 
 # Compiled regex patterns for version normalization (module-level for performance)
 # These patterns convert non-standard version formats to PEP 440 format
@@ -47,7 +51,7 @@ PATTERN_SIMPLE = re.compile(r'^v?(\d+\.\d+\.\d+)$')              # v1.24.1 → 1
 
 async def load_yaml(path: Path) -> dict:
     """Load YAML file asynchronously."""
-    async with aiofiles.open(path, "r", encoding="utf-8") as f:
+    async with aiofiles.open(path, encoding="utf-8") as f:
         content = await f.read()
         return yaml.safe_load(content)
 
@@ -106,10 +110,17 @@ def normalize_version_string(tag: str) -> str:
     return core
 
 
-async def retry_on_rate_limit(coro_func, max_retries=3):
+async def retry_on_rate_limit(coro_func: Callable[[], Awaitable[T]], max_retries: int = 3) -> T | None:
     """
     Wrapper to retry async API calls if rate limited (429 error).
     Uses exponential backoff: 2s, 4s, 8s.
+
+    Args:
+        coro_func: A callable that returns a coroutine (async function to call)
+        max_retries: Maximum number of retry attempts
+
+    Returns:
+        The result of the coroutine, or None if all retries fail
     """
     for attempt in range(max_retries):
         try:
@@ -125,12 +136,12 @@ async def retry_on_rate_limit(coro_func, max_retries=3):
                     raise
             else:
                 raise
-        except Exception as e:
+        except Exception:
             raise
     return None
 
 
-def build_ignore_lookups(ignore_config: Optional[dict]) -> Tuple[Dict[str, dict], Dict[str, dict]]:
+def build_ignore_lookups(ignore_config: dict | None) -> tuple[dict[str, dict], dict[str, dict]]:
     """
     Build optimized lookup structures for ignore rules with pre-compiled regex patterns.
 
@@ -186,7 +197,7 @@ def build_ignore_lookups(ignore_config: Optional[dict]) -> Tuple[Dict[str, dict]
     return docker_ignore_by_id, helm_ignore_by_name
 
 
-def should_ignore_docker_image(entry: dict, tag: str, docker_ignore_by_id: Dict[str, dict]) -> Tuple[bool, Optional[str]]:
+def should_ignore_docker_image(entry: dict, tag: str, docker_ignore_by_id: dict[str, dict]) -> tuple[bool, str | None]:
     """
     Check if a Docker image should be ignored based on ignore configuration.
 
@@ -220,7 +231,7 @@ def should_ignore_docker_image(entry: dict, tag: str, docker_ignore_by_id: Dict[
     return False, None
 
 
-def should_ignore_helm_chart(name: str, version: str, helm_ignore_by_name: Dict[str, dict]) -> Tuple[bool, Optional[str]]:
+def should_ignore_helm_chart(name: str, version: str, helm_ignore_by_name: dict[str, dict]) -> tuple[bool, str | None]:
     """
     Check if a Helm chart should be ignored based on ignore configuration.
 
@@ -249,7 +260,7 @@ def should_ignore_helm_chart(name: str, version: str, helm_ignore_by_name: Dict[
     return False, None
 
 
-def latest_semver(versions: List[str]) -> Optional[str]:
+def latest_semver(versions: list[str]) -> str | None:
     """
     Find the latest stable semver version from a list.
     Filters out alpha, beta, rc, and pre-release versions.
@@ -280,7 +291,7 @@ def latest_semver(versions: List[str]) -> Optional[str]:
     return valid[-1][1]
 
 
-def replace_yaml_scalar(text: str, key: str, old: str, new: str) -> Tuple[str, int]:
+def replace_yaml_scalar(text: str, key: str, old: str, new: str) -> tuple[str, int]:
     """
     Replace a YAML scalar value, handling both quoted and unquoted values.
 
@@ -318,7 +329,7 @@ def replace_yaml_scalar(text: str, key: str, old: str, new: str) -> Tuple[str, i
 # ----------------- HELM STUFF -----------------
 
 
-async def get_latest_helm_chart_version(session: aiohttp.ClientSession, repo_url: str, chart_name: str) -> Optional[str]:
+async def get_latest_helm_chart_version(session: aiohttp.ClientSession, repo_url: str, chart_name: str) -> str | None:
     """Get the latest Helm chart version from a repository."""
     index_url = repo_url.rstrip("/") + "/index.yaml"
 
@@ -332,7 +343,7 @@ async def get_latest_helm_chart_version(session: aiohttp.ClientSession, repo_url
                     resp.raise_for_status()
                     content = await resp.text()
                 break
-            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            except (TimeoutError, aiohttp.ClientError) as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
                     error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
@@ -349,7 +360,7 @@ async def get_latest_helm_chart_version(session: aiohttp.ClientSession, repo_url
     return latest_semver(versions)
 
 
-async def update_argo_app_chart(file_path: Path, chart_name: str, latest_version: str, dry_run: bool) -> Tuple[bool, Optional[str], Optional[str]]:
+async def update_argo_app_chart(file_path: Path, chart_name: str, latest_version: str, dry_run: bool) -> tuple[bool, str | None, str | None]:
     """
     Update spec.source.targetRevision for an Argo CD Application without
     re-dumping the whole YAML. Returns (changed, old, new).
@@ -391,7 +402,7 @@ async def update_argo_app_chart(file_path: Path, chart_name: str, latest_version
 
     # Async file write with lock
     async with FILE_WRITE_LOCK:
-        async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+        async with aiofiles.open(file_path, encoding="utf-8") as f:
             text = await f.read()
         new_text, count = replace_yaml_scalar(text, "targetRevision", current, latest_version)
         if count == 0:
@@ -403,7 +414,7 @@ async def update_argo_app_chart(file_path: Path, chart_name: str, latest_version
     return True, current, latest_version
 
 
-async def update_kustomize_helm_chart(file_path: Path, chart_name: str, latest_version: str, dry_run: bool) -> Tuple[bool, Optional[str], Optional[str]]:
+async def update_kustomize_helm_chart(file_path: Path, chart_name: str, latest_version: str, dry_run: bool) -> tuple[bool, str | None, str | None]:
     """
     Update helmCharts[].version for a given chart in a kustomization.yaml file
     using text-level replacement. Returns (changed, old, new) for the first change.
@@ -451,7 +462,7 @@ async def update_kustomize_helm_chart(file_path: Path, chart_name: str, latest_v
 
     # Async file write with lock
     async with FILE_WRITE_LOCK:
-        async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+        async with aiofiles.open(file_path, encoding="utf-8") as f:
             text = await f.read()
         new_text, count = replace_yaml_scalar(text, "version", target_current, latest_version)
         if count == 0:
@@ -463,7 +474,7 @@ async def update_kustomize_helm_chart(file_path: Path, chart_name: str, latest_v
     return True, target_current, latest_version
 
 
-async def update_chart_yaml(file_path: Path, chart_name: str, latest_version: str, dry_run: bool) -> Tuple[bool, Optional[str], Optional[str]]:
+async def update_chart_yaml(file_path: Path, chart_name: str, latest_version: str, dry_run: bool) -> tuple[bool, str | None, str | None]:
     """
     Update dependencies[].version for a given chart in a Chart.yaml file
     using text-level replacement. Returns (changed, old, new) for the first change.
@@ -511,7 +522,7 @@ async def update_chart_yaml(file_path: Path, chart_name: str, latest_version: st
 
     # Async file write with lock
     async with FILE_WRITE_LOCK:
-        async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+        async with aiofiles.open(file_path, encoding="utf-8") as f:
             text = await f.read()
         new_text, count = replace_yaml_scalar(text, "version", target_current, latest_version)
         if count == 0:
@@ -523,7 +534,7 @@ async def update_chart_yaml(file_path: Path, chart_name: str, latest_version: st
     return True, target_current, latest_version
 
 
-async def process_argo_app(session: aiohttp.ClientSession, app: dict, helm_ignore_by_name: Dict[str, dict], dry_run: bool) -> Tuple[Set[str], List[dict], Optional[str]]:
+async def process_argo_app(session: aiohttp.ClientSession, app: dict, helm_ignore_by_name: dict[str, dict], dry_run: bool) -> tuple[set[str], list[dict], str | None]:
     """Process a single Argo CD app. Returns (changed_files, helm_changes, errors)."""
     changed_files = set()
     helm_changes = []
@@ -574,7 +585,7 @@ async def process_argo_app(session: aiohttp.ClientSession, app: dict, helm_ignor
     return changed_files, helm_changes, None
 
 
-async def process_kustomize_chart(session: aiohttp.ClientSession, entry: dict, helm_ignore_by_name: Dict[str, dict], dry_run: bool) -> Tuple[Set[str], List[dict], Optional[str]]:
+async def process_kustomize_chart(session: aiohttp.ClientSession, entry: dict, helm_ignore_by_name: dict[str, dict], dry_run: bool) -> tuple[set[str], list[dict], str | None]:
     """Process a single Kustomize Helm chart. Returns (changed_files, helm_changes, errors)."""
     changed_files = set()
     helm_changes = []
@@ -619,7 +630,7 @@ async def process_kustomize_chart(session: aiohttp.ClientSession, entry: dict, h
     return changed_files, helm_changes, None
 
 
-async def process_chart_dependency(session: aiohttp.ClientSession, entry: dict, helm_ignore_by_name: Dict[str, dict], dry_run: bool) -> Tuple[Set[str], List[dict], Optional[str]]:
+async def process_chart_dependency(session: aiohttp.ClientSession, entry: dict, helm_ignore_by_name: dict[str, dict], dry_run: bool) -> tuple[set[str], list[dict], str | None]:
     """Process a single Chart.yaml dependency. Returns (changed_files, helm_changes, errors)."""
     changed_files = set()
     helm_changes = []
@@ -664,7 +675,7 @@ async def process_chart_dependency(session: aiohttp.ClientSession, entry: dict, 
     return changed_files, helm_changes, None
 
 
-async def update_helm_charts(session: aiohttp.ClientSession, config: dict, helm_ignore_by_name: Dict[str, dict], dry_run: bool) -> Tuple[Set[str], List[dict]]:
+async def update_helm_charts(session: aiohttp.ClientSession, config: dict, helm_ignore_by_name: dict[str, dict], dry_run: bool) -> tuple[set[str], list[dict]]:
     """Update all Helm charts concurrently."""
     changed_files = set()
     helm_changes = []
@@ -712,7 +723,7 @@ async def update_helm_charts(session: aiohttp.ClientSession, config: dict, helm_
 # ----------------- DOCKER STUFF (Docker Hub, semver-aware) -----------------
 
 
-def parse_image(image_str: str) -> Tuple[str, str]:
+def parse_image(image_str: str) -> tuple[str, str]:
     """
     Split 'repo:tag' or 'registry/repo:tag' into (name, tag).
     """
@@ -722,7 +733,7 @@ def parse_image(image_str: str) -> Tuple[str, str]:
     return name, tag
 
 
-def extract_semver_core(tag: str) -> Optional[str]:
+def extract_semver_core(tag: str) -> str | None:
     """
     Extract a semver-ish core from a tag by taking leading [0-9.] chars.
     """
@@ -735,7 +746,7 @@ def extract_semver_core(tag: str) -> Optional[str]:
     return core or None
 
 
-def parse_semver_from_tag(tag: str) -> Optional[Version]:
+def parse_semver_from_tag(tag: str) -> Version | None:
     """
     Parse a version tag into a packaging.version.Version object.
 
@@ -763,7 +774,7 @@ def parse_semver_from_tag(tag: str) -> Optional[Version]:
         return None
 
 
-def extract_variant_pattern(tag: str) -> Optional[str]:
+def extract_variant_pattern(tag: str) -> str | None:
     """
     Extract the variant/flavor pattern from a Docker tag.
 
@@ -800,7 +811,7 @@ def extract_variant_pattern(tag: str) -> Optional[str]:
     return None
 
 
-def is_tag_candidate(tag: str, required_variant: Optional[str] = None) -> bool:
+def is_tag_candidate(tag: str, required_variant: str | None = None) -> bool:
     """
     Decide whether a tag is eligible for automatic updates.
 
@@ -828,18 +839,18 @@ def is_tag_candidate(tag: str, required_variant: Optional[str] = None) -> bool:
     return True
 
 
-async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> List[str]:
+async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> list[str]:
     """
     List tags from Docker Hub.
 
     Supports authentication via DOCKERHUB_USERNAME and DOCKERHUB_TOKEN environment variables.
     Authentication increases rate limits from 100 req/6h to 200 req/6h (free account).
     """
-    import os
     import base64
+    import os
 
     url = f"https://registry.hub.docker.com/v2/repositories/{api_repo}/tags?page_size=100"
-    tags: List[str] = []
+    tags: list[str] = []
     headers = {}
 
     # Check for Docker Hub authentication
@@ -866,7 +877,7 @@ async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> 
                             tags.append(name)
                     url = data.get("next")
                 break
-            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            except (TimeoutError, aiohttp.ClientError) as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
                     error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
@@ -880,7 +891,7 @@ async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> 
     return tags
 
 
-async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> List[str]:
+async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> list[str]:
     """
     List tags from GitHub Container Registry (ghcr.io).
 
@@ -891,8 +902,8 @@ async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> Lis
 
     Note: GITHUB_TOKEN must be base64 encoded for ghcr.io authentication.
     """
-    import os
     import base64
+    import os
 
     base_url = f"https://ghcr.io/v2/{repository}/tags/list"
     github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
@@ -931,7 +942,7 @@ async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> Lis
                         else:
                             break
                     break
-                except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                except (TimeoutError, aiohttp.ClientError) as e:
                     if attempt < max_retries - 1:
                         wait_time = 2 ** attempt
                         error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
@@ -946,10 +957,10 @@ async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> Lis
         return []
 
 
-async def list_quay_tags(session: aiohttp.ClientSession, repository: str) -> List[str]:
+async def list_quay_tags(session: aiohttp.ClientSession, repository: str) -> list[str]:
     """List tags from Quay.io."""
     url = f"https://quay.io/api/v1/repository/{repository}/tag/?limit=100&page=1"
-    tags: List[str] = []
+    tags: list[str] = []
 
     try:
         while url:
@@ -973,7 +984,7 @@ async def list_quay_tags(session: aiohttp.ClientSession, repository: str) -> Lis
                         else:
                             url = None
                     break
-                except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                except (TimeoutError, aiohttp.ClientError) as e:
                     if attempt < max_retries - 1:
                         wait_time = 2 ** attempt
                         error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
@@ -988,7 +999,7 @@ async def list_quay_tags(session: aiohttp.ClientSession, repository: str) -> Lis
         return []
 
 
-async def list_gcr_tags(session: aiohttp.ClientSession, repository: str) -> List[str]:
+async def list_gcr_tags(session: aiohttp.ClientSession, repository: str) -> list[str]:
     """
     List tags from Google Container Registry (gcr.io).
 
@@ -1010,7 +1021,7 @@ async def list_gcr_tags(session: aiohttp.ClientSession, repository: str) -> List
                     resp.raise_for_status()
                     data = await resp.json()
                     return data.get("tags", [])
-            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            except (TimeoutError, aiohttp.ClientError) as e:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt
                     error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
@@ -1023,7 +1034,7 @@ async def list_gcr_tags(session: aiohttp.ClientSession, repository: str) -> List
         return []
 
 
-async def list_registry_tags(session: aiohttp.ClientSession, registry: str, repository: str) -> List[str]:
+async def list_registry_tags(session: aiohttp.ClientSession, registry: str, repository: str) -> list[str]:
     """
     List tags from any container registry.
 
@@ -1059,7 +1070,7 @@ async def list_registry_tags(session: aiohttp.ClientSession, registry: str, repo
             return []
 
 
-async def find_best_tags_for_same_major(session: aiohttp.ClientSession, registry: str, repository: str, current_tag: str, semaphore: Optional[asyncio.Semaphore] = None, entry: Optional[dict] = None, docker_ignore_by_id: Optional[Dict[str, dict]] = None) -> Tuple[Optional[str], Optional[Version], Optional[str], Optional[Version]]:
+async def find_best_tags_for_same_major(session: aiohttp.ClientSession, registry: str, repository: str, current_tag: str, semaphore: asyncio.Semaphore | None = None, entry: dict | None = None, docker_ignore_by_id: dict[str, dict] | None = None) -> tuple[str | None, Version | None, str | None, Version | None]:
     """
     Find the best tags for the same major version.
 
@@ -1109,8 +1120,8 @@ async def find_best_tags_for_same_major(session: aiohttp.ClientSession, registry
                 if filtered_count > 0:
                     print(f"  [INFO] Filtered out {filtered_count} tags matching versionPattern: {ignore_rule['versionPattern']}")
 
-    same_major: List[Tuple[Version, str]] = []
-    all_versions: List[Tuple[Version, str]] = []
+    same_major: list[tuple[Version, str]] = []
+    all_versions: list[tuple[Version, str]] = []
 
     for t in tags:
         # Filter by variant if current tag has one
@@ -1155,7 +1166,7 @@ async def find_best_tags_for_same_major(session: aiohttp.ClientSession, registry
     return best_same_tag, best_same_ver, best_any_tag, best_any_ver
 
 
-async def update_single_docker_image(session: aiohttp.ClientSession, entry: dict, docker_ignore_by_id: Dict[str, dict], dry_run: bool) -> Tuple[bool, Optional[str], Optional[str], Optional[dict]]:
+async def update_single_docker_image(session: aiohttp.ClientSession, entry: dict, docker_ignore_by_id: dict[str, dict], dry_run: bool) -> tuple[bool, str | None, str | None, dict | None]:
     """Update a single Docker image."""
     try:
         registry = entry.get("registry", "dockerhub")
@@ -1240,7 +1251,7 @@ async def update_single_docker_image(session: aiohttp.ClientSession, entry: dict
 
         # Async file write with lock
         async with FILE_WRITE_LOCK:
-            async with aiofiles.open(file_path, "r", encoding="utf-8") as f:
+            async with aiofiles.open(file_path, encoding="utf-8") as f:
                 text = await f.read()
             new_text, count = replace_yaml_scalar(text, "image", image_str, new_image)
             if count == 0:
@@ -1256,7 +1267,7 @@ async def update_single_docker_image(session: aiohttp.ClientSession, entry: dict
         raise
 
 
-async def update_docker_images(session: aiohttp.ClientSession, config: dict, docker_ignore_by_id: Dict[str, dict], dry_run: bool) -> Tuple[Set[str], List[dict], List[dict]]:
+async def update_docker_images(session: aiohttp.ClientSession, config: dict, docker_ignore_by_id: dict[str, dict], dry_run: bool) -> tuple[set[str], list[dict], list[dict]]:
     """Update all Docker images concurrently."""
     changed_files = set()
     docker_changes = []
@@ -1298,9 +1309,14 @@ async def update_docker_images(session: aiohttp.ClientSession, config: dict, doc
 # ----------------- REPORT -----------------
 
 
-async def write_report(helm_changes: List[dict], docker_changes: List[dict], major_updates: List[dict]):
+async def write_report(helm_changes: list[dict], docker_changes: list[dict], major_updates: list[dict]) -> None:
     """
     Write a human-readable summary to .update-report.txt.
+
+    Args:
+        helm_changes: List of Helm chart version changes
+        docker_changes: List of Docker image version changes
+        major_updates: List of major version updates detected
     """
     if not helm_changes and not docker_changes and not major_updates:
         if REPORT_PATH.exists():
@@ -1351,8 +1367,13 @@ async def write_report(helm_changes: List[dict], docker_changes: List[dict], maj
 # ----------------- MAIN -----------------
 
 
-async def async_main():
-    """Main async function."""
+async def async_main() -> int:
+    """
+    Main async function that orchestrates version updates.
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
     start_time = time.time()
 
     if not CONFIG_PATH.exists():
@@ -1437,7 +1458,7 @@ async def async_main():
     total_helm = len(config.get('argoApps', [])) + len(config.get('kustomizeHelmCharts', [])) + len(config.get('chartDependencies', []))
     total_docker = len(config.get('dockerImages', []))
     print(f"\n{'='*60}")
-    print(f"Performance Summary:")
+    print("Performance Summary:")
     print(f"  Helm charts: {helm_duration:.2f}s ({total_helm} charts)")
     print(f"  Docker images: {docker_duration:.2f}s ({total_docker} images)")
     print(f"  Total time: {total_duration:.2f}s")
@@ -1453,8 +1474,13 @@ async def async_main():
     return 0
 
 
-def main():
-    """Entry point that runs the async main function."""
+def main() -> int:
+    """
+    Entry point that runs the async main function.
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
     return asyncio.run(async_main())
 
 
