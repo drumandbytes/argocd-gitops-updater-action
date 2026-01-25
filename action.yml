@@ -161,13 +161,15 @@ runs:
       if: inputs.auto-discover == 'true'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        CONFIG_PATH: ${{ inputs.config-path }}
       run: |
         # Check for both new and modified files using git status
-        if git status --porcelain ${{ inputs.config-path }} | grep -q .; then
+        if git status --porcelain "$CONFIG_PATH" | grep -q .; then
           echo "changes=true" >> $GITHUB_OUTPUT
           echo "Discovery changes detected"
-          echo "Changes to ${{ inputs.config-path }}:"
-          git diff ${{ inputs.config-path }} || echo "(New file created)"
+          echo "Changes to $CONFIG_PATH:"
+          git diff "$CONFIG_PATH" || echo "(New file created)"
         else
           echo "changes=false" >> $GITHUB_OUTPUT
           echo "No discovery changes detected"
