@@ -79,6 +79,8 @@ jobs:
       - name: Extract changelog
         if: steps.bump_version.outputs.skip_release != 'true'
         id: changelog
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           # Extract [Unreleased] section from CHANGELOG.md
           # This gets everything between [Unreleased] and the next ## heading
@@ -86,7 +88,7 @@ jobs:
 
           if [ -z "$CHANGELOG" ]; then
             # Fallback to PR body if no unreleased section
-            CHANGELOG="${{ github.event.pull_request.body }}"
+            CHANGELOG="$PR_BODY"
           fi
 
           # Write to file to handle multiline
