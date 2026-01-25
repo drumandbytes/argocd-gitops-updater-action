@@ -149,12 +149,21 @@ def build_ignore_lookups(ignore_config: Optional[dict]) -> Tuple[Dict[str, dict]
         if "id" in ignore_rule:
             # Pre-compile regex patterns for performance
             processed_rule = ignore_rule.copy()
+            rule_id = ignore_rule["id"]
 
             if "versionPattern" in ignore_rule:
-                processed_rule["_compiled_version_pattern"] = re.compile(ignore_rule["versionPattern"])
+                try:
+                    processed_rule["_compiled_version_pattern"] = re.compile(ignore_rule["versionPattern"])
+                except re.error as e:
+                    print(f"  [WARN] Invalid versionPattern regex for Docker image '{rule_id}': {e}")
+                    print(f"         Pattern '{ignore_rule['versionPattern']}' will be ignored")
 
             if "tagPattern" in ignore_rule:
-                processed_rule["_compiled_tag_pattern"] = re.compile(ignore_rule["tagPattern"])
+                try:
+                    processed_rule["_compiled_tag_pattern"] = re.compile(ignore_rule["tagPattern"])
+                except re.error as e:
+                    print(f"  [WARN] Invalid tagPattern regex for Docker image '{rule_id}': {e}")
+                    print(f"         Pattern '{ignore_rule['tagPattern']}' will be ignored")
 
             docker_ignore_by_id[ignore_rule["id"]] = processed_rule
 
@@ -163,9 +172,14 @@ def build_ignore_lookups(ignore_config: Optional[dict]) -> Tuple[Dict[str, dict]
     for ignore_rule in helm_ignores:
         if "name" in ignore_rule:
             processed_rule = ignore_rule.copy()
+            rule_name = ignore_rule["name"]
 
             if "versionPattern" in ignore_rule:
-                processed_rule["_compiled_version_pattern"] = re.compile(ignore_rule["versionPattern"])
+                try:
+                    processed_rule["_compiled_version_pattern"] = re.compile(ignore_rule["versionPattern"])
+                except re.error as e:
+                    print(f"  [WARN] Invalid versionPattern regex for Helm chart '{rule_name}': {e}")
+                    print(f"         Pattern '{ignore_rule['versionPattern']}' will be ignored")
 
             helm_ignore_by_name[ignore_rule["name"]] = processed_rule
 

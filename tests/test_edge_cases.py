@@ -151,15 +151,44 @@ class TestIgnoreRulesEdgeCases:
         assert len(helm_ignore) == 1
 
     def test_invalid_regex_pattern(self):
-        """Invalid regex pattern should be handled gracefully."""
+        """Invalid regex pattern should be handled gracefully, not crash."""
         config = {
             "dockerImages": [
                 {"id": "test", "versionPattern": r"[invalid(regex"},
             ]
         }
-        # This should raise an error during compilation
-        with pytest.raises(re.error):
-            update_versions.build_ignore_lookups(config)
+        # Should NOT raise - pattern is skipped with warning
+        docker_ignore, helm_ignore = update_versions.build_ignore_lookups(config)
+
+        # The rule should still be added, but without the compiled pattern
+        assert "test" in docker_ignore
+        assert "_compiled_version_pattern" not in docker_ignore["test"]
+
+    def test_invalid_regex_helm(self):
+        """Invalid regex in Helm ignore should be handled gracefully."""
+        config = {
+            "helmCharts": [
+                {"name": "myapp", "versionPattern": r"[bad(pattern"},
+            ]
+        }
+        # Should NOT raise
+        docker_ignore, helm_ignore = update_versions.build_ignore_lookups(config)
+
+        # The rule should still be added, but without the compiled pattern
+        assert "myapp" in helm_ignore
+        assert "_compiled_version_pattern" not in helm_ignore["myapp"]
+
+    def test_invalid_tag_pattern(self):
+        """Invalid tagPattern regex should be handled gracefully."""
+        config = {
+            "dockerImages": [
+                {"id": "test", "tagPattern": r"[bad(pattern"},
+            ]
+        }
+        docker_ignore, _ = update_versions.build_ignore_lookups(config)
+
+        assert "test" in docker_ignore
+        assert "_compiled_tag_pattern" not in docker_ignore["test"]
 
     def test_empty_lists_in_config(self):
         """Empty lists in config should be handled."""
