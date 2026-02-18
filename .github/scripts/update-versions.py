@@ -326,6 +326,43 @@ def replace_yaml_scalar(text: str, key: str, old: str, new: str) -> tuple[str, i
     return new_text, count
 
 
+def replace_yaml_new_tag(text: str, image_name: str, old: str, new: str) -> tuple[str, int]:
+    """
+    Replace a newTag value in a kustomization.yaml images list, anchored to a specific image name.
+
+    Matches the pattern:
+      - name: <image_name>
+        [optional fields like newName]
+        newTag: <old>
+
+    And replaces <old> with <new>, preserving quotes. This avoids ambiguity when multiple
+    images entries share the same newTag value.
+    """
+    # Match "- name: <image_name>" line, then optional intermediate fields, then "newTag: <old>"
+    # Uses [ \t] instead of \s to avoid matching newlines in wrong places
+    pattern = (
+        rf"(^[ \t]*-[ \t]*name:[ \t]*{re.escape(image_name)}[ \t]*\n"
+        rf"(?:[ \t]+[a-zA-Z]\w*:[ \t]+[^\n]*\n)*?"
+        rf"[ \t]+newTag:[ \t]*)"
+        rf'(["\']?){re.escape(old)}(["\']?)([^\n]*)'
+    )
+
+    def replacer(match):
+        prefix = match.group(1)
+        open_quote = match.group(2)
+        close_quote = match.group(3)
+        suffix = match.group(4)
+        return f"{prefix}{open_quote}{new}{close_quote}{suffix}"
+
+    new_text, count = re.subn(pattern, replacer, text, count=1, flags=re.MULTILINE)
+
+    if count == 0:
+        # Fallback to generic replacement if context-aware match fails
+        return replace_yaml_scalar(text, "newTag", old, new)
+
+    return new_text, count
+
+
 # ----------------- HELM STUFF -----------------
 
 
@@ -1218,18 +1255,36 @@ async def update_single_docker_image(
 
         data = await load_yaml(file_path)
 
-        # follow yamlPath to get current image string
+        # follow yamlPath to get current value
         cur = data
         for key in yaml_path:
             cur = cur[key]
-        image_str = str(cur)
+        current_value = str(cur)
 
-        image_name, current_tag = parse_image(image_str)
+        # Detect if yamlPath targets a newTag field (kustomize overlay) or an image field (deployment spec)
+        is_new_tag_field = yaml_path[-1] == "newTag" if yaml_path else False
+
+        if is_new_tag_field:
+            # Value is a plain tag string (e.g., "6.14.0-alpine3.23")
+            current_tag = current_value
+            image_name = None
+            yaml_key = "newTag"
+            # Extract image name from sibling field for context-aware replacement
+            # yamlPath like ["images", 0, "newTag"] → parent is data["images"][0]
+            parent = data
+            for key in yaml_path[:-1]:
+                parent = parent[key]
+            image_context_name = parent.get("name", "")
+        else:
+            # Value is a full image reference (e.g., "ghost:6.14.0-alpine3.23")
+            image_name, current_tag = parse_image(current_value)
+            yaml_key = "image"
+
         if not current_tag:
-            print(f"  [WARN] No tag found in image '{image_str}', skipping")
+            print(f"  [WARN] No tag found in '{current_value}', skipping")
             return False, None, None, None
 
-        print(f"  Current image: {image_str}")
+        print(f"  Current {'tag' if is_new_tag_field else 'image'}: {current_value}")
 
         # Check if this image should be ignored
         ignored, reason = should_ignore_docker_image(entry, current_tag, docker_ignore_by_id)
@@ -1281,24 +1336,30 @@ async def update_single_docker_image(
             print("  -> already at latest version for this major")
             return False, None, None, major_available
 
-        new_image = f"{image_name}:{best_same_tag}"
-        print(f"  -> updating image to {new_image}")
+        if is_new_tag_field:
+            new_value = best_same_tag
+        else:
+            new_value = f"{image_name}:{best_same_tag}"
+        print(f"  -> updating to {new_value}")
 
         if dry_run:
-            return True, image_str, new_image, major_available
+            return True, current_value, new_value, major_available
 
         # Async file write with lock
         async with FILE_WRITE_LOCK:
             async with aiofiles.open(file_path, encoding="utf-8") as f:
                 text = await f.read()
-            new_text, count = replace_yaml_scalar(text, "image", image_str, new_image)
+            if is_new_tag_field and image_context_name:
+                new_text, count = replace_yaml_new_tag(text, image_context_name, current_value, new_value)
+            else:
+                new_text, count = replace_yaml_scalar(text, yaml_key, current_value, new_value)
             if count == 0:
-                print(f"  [WARN] Could not replace image '{image_str}' in {file_path}")
+                print(f"  [WARN] Could not replace {yaml_key} '{current_value}' in {file_path}")
                 return False, None, None, major_available
             async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
                 await f.write(new_text)
 
-        return True, image_str, new_image, major_available
+        return True, current_value, new_value, major_available
     except Exception as e:
         print(
             f"  [ERROR] Exception in update_single_docker_image for {entry.get('id', 'unknown')}: {type(e).__name__}: {e}"

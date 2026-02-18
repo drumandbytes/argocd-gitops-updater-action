@@ -87,3 +87,101 @@ class TestReplaceYamlScalar:
         )
         assert count == 1
         assert "image: ghcr.io/owner/repo:v2.0.0" in new_text
+
+    def test_new_tag_unquoted(self):
+        """Test replacing unquoted newTag value in kustomization.yaml."""
+        text = "images:\n  - name: ghost\n    newTag: 6.14.0-alpine3.23\n"
+        new_text, count = update_versions.replace_yaml_scalar(
+            text, "newTag", "6.14.0-alpine3.23", "6.15.0-alpine3.23"
+        )
+        assert count == 1
+        assert "newTag: 6.15.0-alpine3.23" in new_text
+
+    def test_new_tag_quoted(self):
+        """Test replacing quoted newTag value in kustomization.yaml."""
+        text = 'images:\n  - name: curlimages/curl\n    newTag: "8.12.1"\n'
+        new_text, count = update_versions.replace_yaml_scalar(
+            text, "newTag", "8.12.1", "8.13.0"
+        )
+        assert count == 1
+        assert 'newTag: "8.13.0"' in new_text
+
+    def test_new_tag_only_replaces_first(self):
+        """Test that only the first newTag occurrence is replaced when values differ."""
+        text = (
+            "images:\n"
+            "  - name: app\n"
+            "    newTag: 1.0.0\n"
+            "  - name: other\n"
+            "    newTag: 2.0.0\n"
+        )
+        new_text, count = update_versions.replace_yaml_scalar(
+            text, "newTag", "1.0.0", "1.1.0"
+        )
+        assert count == 1
+        assert "newTag: 1.1.0" in new_text
+        assert "newTag: 2.0.0" in new_text
+
+
+class TestReplaceYamlNewTag:
+    """Tests for replace_yaml_new_tag (context-aware newTag replacement)."""
+
+    def test_targets_correct_image_by_name(self):
+        """Test that replacement targets the correct image when multiple share the same tag."""
+        text = (
+            "images:\n"
+            "  - name: ghcr.io/owner/app\n"
+            "    newTag: latest\n"
+            "  - name: ghcr.io/owner/init\n"
+            "    newTag: latest\n"
+            "  - name: curlimages/curl\n"
+            '    newTag: "8.12.1"\n'
+        )
+        # Update only the second image (init)
+        new_text, count = update_versions.replace_yaml_new_tag(
+            text, "ghcr.io/owner/init", "latest", "1.2.0"
+        )
+        assert count == 1
+        # First image should still be "latest"
+        assert "  - name: ghcr.io/owner/app\n    newTag: latest\n" in new_text
+        # Second image should be updated
+        assert "  - name: ghcr.io/owner/init\n    newTag: 1.2.0\n" in new_text
+
+    def test_preserves_quotes(self):
+        """Test that quotes around newTag value are preserved."""
+        text = (
+            "images:\n"
+            "  - name: curlimages/curl\n"
+            '    newTag: "8.12.1"\n'
+        )
+        new_text, count = update_versions.replace_yaml_new_tag(
+            text, "curlimages/curl", "8.12.1", "8.13.0"
+        )
+        assert count == 1
+        assert 'newTag: "8.13.0"' in new_text
+
+    def test_handles_intermediate_fields(self):
+        """Test that intermediate fields between name and newTag are handled."""
+        text = (
+            "images:\n"
+            "  - name: ghost\n"
+            "    newName: ghcr.io/ghost/ghost\n"
+            "    newTag: 6.14.0\n"
+        )
+        new_text, count = update_versions.replace_yaml_new_tag(
+            text, "ghost", "6.14.0", "6.15.0"
+        )
+        assert count == 1
+        assert "newTag: 6.15.0" in new_text
+        assert "newName: ghcr.io/ghost/ghost" in new_text
+
+    def test_falls_back_to_generic_on_no_match(self):
+        """Test fallback to replace_yaml_scalar when name doesn't match."""
+        text = "images:\n  - name: other\n    newTag: 1.0.0\n"
+        # Using a non-matching name should fall back
+        new_text, count = update_versions.replace_yaml_new_tag(
+            text, "nonexistent", "1.0.0", "2.0.0"
+        )
+        # Fallback should still find and replace the value
+        assert count == 1
+        assert "newTag: 2.0.0" in new_text
