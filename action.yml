@@ -249,18 +249,23 @@ runs:
     - name: Capture update report
       id: report
       if: steps.discovery-pr.outputs.pull-request-number == ''
-      shell: bash
+      shell: python3 {0}
       working-directory: ${{ inputs.working-directory }}
       run: |
-        if [ -f ".update-report.txt" ]; then
-          {
-            echo 'report<<EOF'
-            cat .update-report.txt
-            echo EOF
-          } >> "$GITHUB_OUTPUT"
-        else
-          echo "report=(No detailed update report was generated.)" >> "$GITHUB_OUTPUT"
-        fi
+        import os, secrets
+
+        report_path = ".update-report.txt"
+        github_output = os.environ["GITHUB_OUTPUT"]
+
+        if os.path.exists(report_path):
+            with open(report_path) as f:
+                content = f.read()
+            delimiter = secrets.token_hex(16)
+            with open(github_output, "a") as out:
+                out.write(f"report<<{delimiter}\n{content}\n{delimiter}\n")
+        else:
+            with open(github_output, "a") as out:
+                out.write("report=(No detailed update report was generated.)\n")
 
     - name: Clean up temporary files
       if: steps.discovery-pr.outputs.pull-request-number == ''
