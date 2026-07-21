@@ -1431,8 +1431,6 @@ async def write_report(helm_changes: list[dict], docker_changes: list[dict], maj
     total_docker = len(docker_changes)
     total_major = len(major_updates)
 
-    lines.append("Update summary")
-    lines.append("================")
     lines.append(f"Helm charts updated: {total_helm}")
     lines.append(f"Docker images updated: {total_docker}")
     lines.append(f"Major versions available: {total_major}")
