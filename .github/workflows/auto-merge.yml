@@ -12,7 +12,10 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    if: >
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion == 'success'
+    # Only the conclusion is checked, not workflow_run.event: a same-repo
+    # branch (which is how Dependabot pushes) triggers CI as 'push', not
+    # 'pull_request', so gating on the event silently skipped every run. The
+    # reusable workflow looks up the PR and enforces the author allow-list,
+    # which is the actual safety gate; a run with no open PR just no-ops.
+    if: github.event.workflow_run.conclusion == 'success'
     uses: drumandbytes/reusable-actions/.github/workflows/auto-merge.yml@v1
