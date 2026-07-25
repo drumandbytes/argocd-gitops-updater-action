@@ -16,6 +16,3 @@ jobs:
         action.yml
         .github/scripts/update-versions.py
         .github/scripts/discover-resources.py
-
-  security:
-    uses: drumandbytes/reusable-actions/.github/workflows/security-scan.yml@v1

@@ -1,0 +1,15 @@
+name: Security
+
+# Split out of the CI workflow deliberately. Auto-merge gates on the CI
+# workflow's conclusion, so keeping the scan in CI meant a vulnerability in
+# one package blocked merging a Dependabot PR that fixed a different one —
+# the gate held its own fixes hostage. Findings still fail this workflow.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  security:
+    uses: drumandbytes/reusable-actions/.github/workflows/security-scan.yml@v1
