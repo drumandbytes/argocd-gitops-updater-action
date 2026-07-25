@@ -1,0 +1,18 @@
+name: Auto merge
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+jobs:
+  auto-merge:
+    # The reusable workflow cannot grant itself more than the caller has, and
+    # the org default for GITHUB_TOKEN is read-only — so declare it here.
+    permissions:
+      contents: write
+      pull-requests: write
+    if: >
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    uses: drumandbytes/reusable-actions/.github/workflows/auto-merge.yml@v1
