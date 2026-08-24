@@ -952,24 +952,38 @@ async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> lis
     """
     List tags from GitHub Container Registry (ghcr.io).
 
-    Uses Docker Registry HTTP API V2 with token authentication.
+    Uses Docker Registry HTTP API V2 with proper OAuth2 token exchange.
     Handles pagination to fetch all tags (API returns max 100 per request).
-    For public images, works without authentication.
+    For public images, works without authentication (anonymous token).
     For private images or higher rate limits, set GITHUB_TOKEN environment variable.
 
-    The token is automatically base64-encoded by this function.
+    ghcr.io does NOT accept a GITHUB_TOKEN (even base64-encoded) directly as
+    a Bearer token - that was the previous, broken implementation here. It
+    doesn't fail fast on the malformed header either, so requests using it
+    would hang for the full 30s timeout on every retry instead of getting a
+    quick 401, making every GHCR-hosted image cost minutes instead of
+    seconds. A real bearer token has to be obtained from ghcr.io's own
+    /token endpoint first, per the standard Docker Registry v2 auth flow.
     """
-    import base64
     import os
 
-    base_url = f"https://ghcr.io/v2/{repository}/tags/list"
     github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    token_url = f"https://ghcr.io/token?service=ghcr.io&scope=repository:{repository}:pull"
+    auth = aiohttp.BasicAuth("token", github_token) if github_token else None
 
+    bearer_token = None
+    try:
+        async with session.get(token_url, auth=auth, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            resp.raise_for_status()
+            token_data = await resp.json()
+            bearer_token = token_data.get("token") or token_data.get("access_token")
+    except Exception as e:
+        print(f"  [WARN] Failed to obtain ghcr.io auth token for {repository}: {e}")
+
+    base_url = f"https://ghcr.io/v2/{repository}/tags/list"
     headers = {}
-    if github_token:
-        # ghcr.io requires base64-encoded GITHUB_TOKEN
-        encoded_token = base64.b64encode(github_token.encode()).decode()
-        headers["Authorization"] = f"Bearer {encoded_token}"
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
 
     all_tags = []
     url = f"{base_url}?n=1000"  # Request up to 1000 tags per page
@@ -986,18 +1000,21 @@ async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> lis
                         tags = data.get("tags", [])
                         all_tags.extend(tags)
 
-                        # Check for pagination link in Link header
+                        # Check for pagination link in Link header. Must
+                        # explicitly set url to None when there's no next
+                        # page - the old `break` here only exited this
+                        # retry loop, not the outer `while url:` loop, so
+                        # url kept its previous (still-truthy) value and the
+                        # same page got re-fetched forever for any repo
+                        # whose tags fit on a single page.
                         link_header = resp.headers.get("Link", "")
+                        next_url = None
                         if link_header and 'rel="next"' in link_header:
-                            # Extract next URL from Link header
                             # Format: </v2/repo/tags/list?n=100&last=tag>; rel="next"
                             match = re.search(r'<(/v2/[^>]+)>;\s*rel="next"', link_header)
                             if match:
-                                url = f"https://ghcr.io{match.group(1)}"
-                            else:
-                                break
-                        else:
-                            break
+                                next_url = f"https://ghcr.io{match.group(1)}"
+                        url = next_url
                     break
                 except (TimeoutError, aiohttp.ClientError) as e:
                     if attempt < max_retries - 1:
