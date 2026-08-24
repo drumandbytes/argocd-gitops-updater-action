@@ -898,25 +898,52 @@ async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> 
     """
     List tags from Docker Hub.
 
-    Supports authentication via DOCKERHUB_USERNAME and DOCKERHUB_TOKEN environment variables.
-    Authentication increases rate limits from 100 req/6h to 200 req/6h (free account).
+    Uses the actual Docker Registry HTTP API V2 (registry-1.docker.io) with
+    a real OAuth2 token exchange via auth.docker.io, not Docker Hub's
+    web-facing "hub" API (registry.hub.docker.com/v2/repositories/...).
+
+    The hub API was the previous implementation here, authenticated with
+    plain HTTP Basic Auth - which that API doesn't actually accept (still
+    403s with valid credentials), and its proper login endpoint
+    (hub.docker.com/v2/users/login/) sits behind a Cloudflare bot-challenge
+    for non-browser clients, so credentials could never actually raise the
+    rate limit through that path. The registry API doesn't have either
+    problem: works anonymously for public images, and a real bearer token
+    (with higher rate limits) is available via the same token-exchange flow
+    ghcr.io uses, just authenticating against Docker's own token issuer.
+
+    Supports authentication via DOCKERHUB_USERNAME and DOCKERHUB_TOKEN
+    environment variables for the higher authenticated rate limit.
     """
-    import base64
     import os
 
-    url = f"https://registry.hub.docker.com/v2/repositories/{api_repo}/tags?page_size=100"
-    tags: list[str] = []
-    headers = {}
+    # Official single-name images (e.g. "nginx", "redis") live under the
+    # "library/" namespace on the actual registry, even though Docker Hub's
+    # UI and the old hub API accepted the bare name.
+    if "/" not in api_repo:
+        api_repo = f"library/{api_repo}"
 
-    # Check for Docker Hub authentication
     dockerhub_username = os.environ.get("DOCKERHUB_USERNAME")
     dockerhub_token = os.environ.get("DOCKERHUB_TOKEN") or os.environ.get("DOCKERHUB_PASSWORD")
 
-    if dockerhub_username and dockerhub_token:
-        # Use HTTP Basic Auth for Docker Hub API
-        credentials = f"{dockerhub_username}:{dockerhub_token}"
-        encoded = base64.b64encode(credentials.encode()).decode()
-        headers["Authorization"] = f"Basic {encoded}"
+    token_url = f"https://auth.docker.io/token?service=registry.docker.io&scope=repository:{api_repo}:pull"
+    auth = aiohttp.BasicAuth(dockerhub_username, dockerhub_token) if dockerhub_username and dockerhub_token else None
+
+    bearer_token = None
+    try:
+        async with session.get(token_url, auth=auth, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            resp.raise_for_status()
+            token_data = await resp.json()
+            bearer_token = token_data.get("token") or token_data.get("access_token")
+    except Exception as e:
+        print(f"  [WARN] Failed to obtain Docker Hub auth token for {api_repo}: {e}")
+
+    headers = {}
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+
+    tags: list[str] = []
+    url = f"https://registry-1.docker.io/v2/{api_repo}/tags/list?n=1000"
 
     while url:
         # Retry logic for transient network errors
@@ -926,11 +953,19 @@ async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> 
                 async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
-                    for r in data.get("results", []):
-                        name = r.get("name")
-                        if name:
-                            tags.append(name)
-                    url = data.get("next")
+                    tags.extend(data.get("tags", []))
+
+                    # Check for pagination link in Link header (same
+                    # Docker Registry v2 pagination scheme as ghcr.io) -
+                    # url must be explicitly cleared when there's no next
+                    # page, not just left with its previous value.
+                    link_header = resp.headers.get("Link", "")
+                    next_url = None
+                    if link_header and 'rel="next"' in link_header:
+                        match = re.search(r'<(/v2/[^>]+)>;\s*rel="next"', link_header)
+                        if match:
+                            next_url = f"https://registry-1.docker.io{match.group(1)}"
+                    url = next_url
                 break
             except (TimeoutError, aiohttp.ClientError) as e:
                 if attempt < max_retries - 1:
