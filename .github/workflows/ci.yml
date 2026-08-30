@@ -19,7 +19,7 @@ jobs:
   ci:
     uses: drumandbytes/reusable-actions/.github/workflows/python-action-ci.yml@v1
     with:
-      test-dependencies: "pytest pytest-asyncio aiohttp aiofiles pyyaml packaging"
+      test-dependencies: "pytest pytest-asyncio aiohttp aiofiles pyyaml packaging ruamel.yaml"
       required-files: |
         action.yml
         .github/scripts/update-versions.py
