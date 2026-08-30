@@ -149,6 +149,14 @@ jobs:
           NEW_VERSION="${{ steps.bump_version.outputs.new_version }}"
           MAJOR_TAG="${{ steps.bump_version.outputs.major_tag }}"
 
+          # The previous step (softprops/action-gh-release) created
+          # $NEW_VERSION as a tag on the remote via the GitHub API - this
+          # checkout has no local knowledge of it yet, so `git tag
+          # "$MAJOR_TAG" "$NEW_VERSION"` below would fail to resolve it
+          # ("fatal: Failed to resolve '$NEW_VERSION' as a valid ref")
+          # without fetching it first.
+          git fetch origin "refs/tags/$NEW_VERSION:refs/tags/$NEW_VERSION"
+
           # Delete the old major tag (locally and remotely)
           git tag -d "$MAJOR_TAG" 2>/dev/null || true
           git push origin ":refs/tags/$MAJOR_TAG" 2>/dev/null || true
