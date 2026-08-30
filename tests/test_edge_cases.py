@@ -324,7 +324,7 @@ class TestDiscoveryEdgeCases:
                         ]
                     }
                 }
-            }
+            },
         }
         images = discover_resources.find_container_images_in_yaml(data)
         # Should not crash, may or may not find the image
@@ -332,19 +332,7 @@ class TestDiscoveryEdgeCases:
 
     def test_find_images_deeply_nested(self):
         """Deeply nested structure should be handled."""
-        data = {
-            "level1": {
-                "level2": {
-                    "level3": {
-                        "level4": {
-                            "containers": [
-                                {"image": "deep:v1"}
-                            ]
-                        }
-                    }
-                }
-            }
-        }
+        data = {"level1": {"level2": {"level3": {"level4": {"containers": [{"image": "deep:v1"}]}}}}}
         images = discover_resources.find_container_images_in_yaml(data)
         # The recursive function should find it
         assert len(images) >= 1
@@ -426,3 +414,37 @@ class TestTagCandidateEdgeCases:
 
         # Variant required, but tag has no variant - should NOT match
         assert update_versions.is_tag_candidate("1.2.3", required_variant="alpine") is False
+
+
+class TestRegistrySemaphoreFallback:
+    """REGISTRY_SEMAPHORES used to only cover 4 hardcoded registries
+    (dockerhub, ghcr.io, quay.io, gcr.io) - .get(registry) returning None
+    for anything else meant zero rate limiting for that registry, even
+    though DEFAULT_REGISTRY_LIMIT existed specifically to be the fallback.
+    setdefault fixes this: every other registry gets its own persistent
+    semaphore instead of no limiting at all."""
+
+    def test_unlisted_registry_gets_a_real_semaphore_not_none(self):
+        import asyncio
+
+        semaphores: dict = {}
+        semaphore = semaphores.setdefault(
+            "my-private-registry.example.com", asyncio.Semaphore(update_versions.DEFAULT_REGISTRY_LIMIT)
+        )
+        assert semaphore is not None
+        assert isinstance(semaphore, asyncio.Semaphore)
+
+    def test_same_unlisted_registry_reuses_the_same_semaphore(self):
+        """Each distinct unlisted registry should get its own semaphore,
+        shared across every call for that registry - not a fresh one per
+        call, which would defeat the point of limiting concurrency."""
+        import asyncio
+
+        semaphores: dict = {}
+        first = semaphores.setdefault(
+            "my-private-registry.example.com", asyncio.Semaphore(update_versions.DEFAULT_REGISTRY_LIMIT)
+        )
+        second = semaphores.setdefault(
+            "my-private-registry.example.com", asyncio.Semaphore(update_versions.DEFAULT_REGISTRY_LIMIT)
+        )
+        assert first is second

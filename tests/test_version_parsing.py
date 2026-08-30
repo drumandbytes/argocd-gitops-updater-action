@@ -149,6 +149,40 @@ class TestIsTagCandidate:
         assert update_versions.is_tag_candidate("1.2.3", required_variant=None) is True
         assert update_versions.is_tag_candidate("1.2.3-alpine", required_variant=None) is False
 
+    def test_rejects_prerelease_markers_but_not_words_that_merely_contain_them(self):
+        """is_tag_candidate rejects tags via _contains_prerelease_marker,
+        which used to be a plain substring check ("rc" in tag) - wrongly
+        rejecting any tag containing those letters anywhere, including
+        as part of an unrelated word. Testing through is_tag_candidate
+        directly (rather than the lower-level helper) also exercises its
+        separate variant-matching step, which independently requires
+        every non-empty variant suffix to match required_variant - so the
+        "still accepted" cases below all use required_variant matching
+        the tag's own variant, isolating this test to the prerelease-
+        marker fix specifically."""
+        assert update_versions.is_tag_candidate("1.2.3-arch", required_variant="arch") is True
+        assert update_versions.is_tag_candidate("1.2.3-force", required_variant="force") is True
+        assert update_versions.is_tag_candidate("1.2.3-src", required_variant="src") is True
+        assert update_versions.is_tag_candidate("1.2.3-rc1") is False
+        assert update_versions.is_tag_candidate("1.2.3-rc") is False
+
+
+class TestContainsPrereleaseMarker:
+    """Direct tests for _contains_prerelease_marker - the actual fix for
+    the substring-vs-word-boundary bug, isolated from is_tag_candidate's
+    unrelated variant-matching logic."""
+
+    def test_rejects_real_prerelease_markers(self):
+        assert update_versions._contains_prerelease_marker("1.2.3-rc1", ["rc"]) is True
+        assert update_versions._contains_prerelease_marker("1.2.3-rc", ["rc"]) is True
+        assert update_versions._contains_prerelease_marker("1.2.3.rc2", ["rc"]) is True
+        assert update_versions._contains_prerelease_marker("1.0.0-alpha", ["alpha", "beta", "rc"]) is True
+
+    def test_does_not_reject_words_that_merely_contain_the_marker(self):
+        assert update_versions._contains_prerelease_marker("1.2.3-arch", ["rc"]) is False
+        assert update_versions._contains_prerelease_marker("1.2.3-force", ["rc"]) is False
+        assert update_versions._contains_prerelease_marker("1.2.3-src", ["rc"]) is False
+
 
 class TestParseImage:
     """Tests for parse_image function."""

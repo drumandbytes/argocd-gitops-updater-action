@@ -153,9 +153,15 @@ runs:
         DOCKERHUB_USERNAME: ${{ inputs.dockerhub-username }}
         DOCKERHUB_TOKEN: ${{ inputs.dockerhub-token }}
         ACTION_PATH: ${{ github.action_path }}
+        CONFIG_PATH: ${{ inputs.config-path }}
+        DRY_RUN: ${{ inputs.dry-run }}
       run: |
         echo "Auto-discovering resources..."
-        python "$ACTION_PATH/.github/scripts/discover-resources.py"
+        if [ "$DRY_RUN" = "true" ]; then
+          python "$ACTION_PATH/.github/scripts/discover-resources.py" --dry-run
+        else
+          python "$ACTION_PATH/.github/scripts/discover-resources.py"
+        fi
 
     - name: Check for discovery changes
       id: discovery-changes

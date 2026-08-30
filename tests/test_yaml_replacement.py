@@ -203,3 +203,59 @@ class TestFindMatchingHelmSource:
 
     def test_no_source_or_sources(self):
         assert update_versions._find_matching_helm_source({}, "grafana") is None
+
+
+class TestReplaceYamlScalarAnchored:
+    """Tests for replace_yaml_scalar_anchored - proves the fix for two
+    real bugs: a multi-source Application's companion source could have
+    its targetRevision rewritten instead of the Helm chart's, and a
+    kustomization.yaml/Chart.yaml with two entries sharing the same
+    current version could have the wrong one bumped."""
+
+    def test_targets_the_source_with_matching_chart_not_first_targetrevision(self):
+        """The exact multi-source bug: the companion (non-Helm) source's
+        targetRevision happens to equal the chart's current version and
+        appears earlier in the file - an unscoped replace would rewrite
+        that line instead of the chart's."""
+        text = (
+            "spec:\n"
+            "  sources:\n"
+            "    - repoURL: https://github.com/example/repo\n"
+            "      targetRevision: 2.19.3\n"
+            "      path: apps/sealed-secrets\n"
+            "    - repoURL: https://bitnami-labs.github.io/sealed-secrets\n"
+            "      chart: sealed-secrets\n"
+            "      targetRevision: 2.19.3\n"
+        )
+        new_text, count = update_versions.replace_yaml_scalar_anchored(
+            text, "chart", "sealed-secrets", "targetRevision", "2.19.3", "2.20.0"
+        )
+        assert count == 1
+        # The Helm source's targetRevision changed...
+        assert "chart: sealed-secrets\n      targetRevision: 2.20.0" in new_text
+        # ...and the companion git source's identical-looking value did not:
+        # exactly one "2.19.3" (the companion's) survives, and exactly one
+        # "2.20.0" (the chart's, newly written) exists.
+        assert new_text.count("2.19.3") == 1
+        assert new_text.count("2.20.0") == 1
+
+    def test_kustomize_version_anchored_by_name_not_first_match(self):
+        """Two helmCharts entries sharing the same current version: only
+        the one matching the given name must be bumped."""
+        text = "helmCharts:\n  - name: chart-a\n    version: 1.0.0\n  - name: chart-b\n    version: 1.0.0\n"
+        new_text, count = update_versions.replace_yaml_scalar_anchored(
+            text, "name", "chart-b", "version", "1.0.0", "2.0.0", list_item=True
+        )
+        assert count == 1
+        assert "name: chart-a\n    version: 1.0.0" in new_text
+        assert "name: chart-b\n    version: 2.0.0" in new_text
+
+    def test_falls_back_to_unscoped_replace_when_anchor_not_found(self):
+        """Graceful degradation, matching replace_yaml_new_tag's existing
+        fallback behavior, rather than silently doing nothing."""
+        text = "targetRevision: 1.0.0\n"
+        new_text, count = update_versions.replace_yaml_scalar_anchored(
+            text, "chart", "nonexistent", "targetRevision", "1.0.0", "2.0.0"
+        )
+        assert count == 1
+        assert "targetRevision: 2.0.0" in new_text
