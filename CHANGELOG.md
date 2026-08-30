@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-08-30
+
 ### Changed
 - `discover-resources.py` now uses `ruamel.yaml`'s round-trip mode to read/write `.update-config.yaml`, instead of plain PyYAML. Every existing comment in the file is now preserved across an auto-discover run - previously, every single comment was silently stripped on every run, since plain `yaml.safe_load`/`yaml.dump` has no concept of comments at all.
 - `merge_configs` now appends genuinely new entries to the end of each section's existing list in place, rather than rebuilding and re-sorting the whole list from scratch. Behaviorally identical to before (an existing entry always won over a matching discovered one; that's unchanged), but this is also what makes comment preservation possible - nothing about the original structure is disturbed except appending brand-new items, which have no comment to preserve in the first place.
