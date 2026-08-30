@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-08-30
+
 ### Fixed
 - Both `create-pull-request` steps (auto-discovery PR and version-update PR) now actually use the `github-token` input, instead of silently ignoring it and hardcoding `${{ github.token }}`. Previously, a caller passing a custom `github-token` (e.g. a GitHub App installation token) got it applied only to registry auth inside the Python scripts - the PR itself was still always authored as `github-actions[bot]` using the job's own default token, regardless of what was passed in.
 
