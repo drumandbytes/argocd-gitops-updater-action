@@ -270,3 +270,64 @@ class TestMergeConfigsPreservesUnknownSections:
         discovered = {}
         merged = discover_resources.merge_configs(existing, discovered)
         assert merged["ignore"] == existing["ignore"]
+
+
+class TestRoundtripCommentPreservation:
+    """Proves the actual end-to-end claim: running a real .update-config.yaml
+    through load -> merge_configs -> dump with ruamel.yaml's round-trip mode
+    keeps every existing comment intact, while still correctly adding new
+    entries discovery finds. A plain yaml.safe_load/yaml.dump round-trip
+    (what this script used before) has no concept of comments at all and
+    would silently drop every one of these on write."""
+
+    def test_header_and_inline_comments_survive_a_real_merge(self):
+        original = """\
+# Consumed by update-versions.yml. Re-run discover-versions.yml after
+# adding new apps to pick up anything missing here.
+argoApps:
+  - name: sealed-secrets
+    repoUrl: https://bitnami-labs.github.io/sealed-secrets
+    file: apps/sealed-secrets/application.yaml
+  # newly-added apps go below this line
+dockerImages: []
+# home-assistant is deliberately NOT tracked - see PR #42 for why.
+"""
+        existing = discover_resources.load_yaml_roundtrip(original)
+        discovered = {
+            "argoApps": [
+                {
+                    "name": "loki",
+                    "repoUrl": "https://grafana.github.io/helm-charts",
+                    "file": "apps/loki/application.yaml",
+                },
+            ]
+        }
+
+        merged = discover_resources.merge_configs(existing, discovered)
+        output = discover_resources.dump_yaml_roundtrip(merged)
+
+        # Every original comment is still there, verbatim.
+        assert "# Consumed by update-versions.yml. Re-run discover-versions.yml after" in output
+        assert "# newly-added apps go below this line" in output
+        assert "# home-assistant is deliberately NOT tracked - see PR #42 for why." in output
+        # The existing entry is untouched, and the new one was genuinely added.
+        assert "name: sealed-secrets" in output
+        assert "name: loki" in output
+
+    def test_existing_empty_section_with_comment_is_not_replaced_wholesale(self):
+        """An existing-but-empty section (dockerImages: [] with its own
+        trailing comment) must not be discarded just because it's empty -
+        confirmed via a real regression this exact scenario would hit if
+        merge_configs used truthiness instead of an explicit None check."""
+        original = """\
+argoApps: []
+dockerImages: []  # nothing tracked yet, added on purpose
+"""
+        existing = discover_resources.load_yaml_roundtrip(original)
+        discovered = {"dockerImages": [{"id": "app", "registry": "dockerhub", "repository": "org/app"}]}
+
+        merged = discover_resources.merge_configs(existing, discovered)
+        output = discover_resources.dump_yaml_roundtrip(merged)
+
+        assert "# nothing tracked yet, added on purpose" in output
+        assert "id: app" in output
