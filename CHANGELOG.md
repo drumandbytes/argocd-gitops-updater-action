@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.4] - 2026-08-30
+
 ### Fixed
 - Discovery and version-checking for Argo CD Applications now also check the multi-source shape (`spec.sources[]`), not just the legacy single-source shape (`spec.source`). Every multi-source Helm-chart Application was previously invisible to both `discover-resources.py` and `update-versions.py` - confirmed against a real consuming repo where this meant zero Helm charts were ever discovered or updated.
 - `discover-resources.py`'s config merge no longer silently drops top-level sections it doesn't recognize (e.g. a `helmCharts` section pre-dating the `argoApps`/`kustomizeHelmCharts`/`chartDependencies` split). They're now preserved as-is with a log line, instead of being deleted from `.update-config.yaml` on the next auto-discover run.
