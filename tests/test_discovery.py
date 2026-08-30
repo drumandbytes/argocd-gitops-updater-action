@@ -78,15 +78,7 @@ class TestFindContainerImages:
         """Test finding image in simple deployment."""
         data = {
             "kind": "Deployment",
-            "spec": {
-                "template": {
-                    "spec": {
-                        "containers": [
-                            {"name": "app", "image": "nginx:1.24.0"}
-                        ]
-                    }
-                }
-            }
+            "spec": {"template": {"spec": {"containers": [{"name": "app", "image": "nginx:1.24.0"}]}}},
         }
         images = discover_resources.find_container_images_in_yaml(data)
         assert len(images) == 1
@@ -101,11 +93,11 @@ class TestFindContainerImages:
                     "spec": {
                         "containers": [
                             {"name": "app", "image": "nginx:1.24.0"},
-                            {"name": "sidecar", "image": "busybox:1.36"}
+                            {"name": "sidecar", "image": "busybox:1.36"},
                         ]
                     }
                 }
-            }
+            },
         }
         images = discover_resources.find_container_images_in_yaml(data)
         assert len(images) == 2
@@ -117,25 +109,18 @@ class TestFindContainerImages:
             "spec": {
                 "template": {
                     "spec": {
-                        "initContainers": [
-                            {"name": "init", "image": "busybox:1.36"}
-                        ],
-                        "containers": [
-                            {"name": "app", "image": "nginx:1.24.0"}
-                        ]
+                        "initContainers": [{"name": "init", "image": "busybox:1.36"}],
+                        "containers": [{"name": "app", "image": "nginx:1.24.0"}],
                     }
                 }
-            }
+            },
         }
         images = discover_resources.find_container_images_in_yaml(data)
         assert len(images) == 2
 
     def test_no_images(self):
         """Test data without images."""
-        data = {
-            "kind": "ConfigMap",
-            "data": {"key": "value"}
-        }
+        data = {"kind": "ConfigMap", "data": {"key": "value"}}
         images = discover_resources.find_container_images_in_yaml(data)
         assert len(images) == 0
 
@@ -186,3 +171,102 @@ class TestShouldIgnoreHelmChart:
         ignore_config = {"helmCharts": [{"name": "prometheus"}]}
         ignored, reason = discover_resources.should_ignore_helm_chart("grafana", ignore_config)
         assert ignored is False
+
+
+class TestFindHelmSource:
+    """Tests for _find_helm_source - covers both Argo CD Application source shapes."""
+
+    def test_legacy_single_source(self):
+        """The old spec.source shape must still be found."""
+        spec = {"source": {"chart": "grafana", "repoURL": "https://example.com/charts"}}
+        source = discover_resources._find_helm_source(spec)
+        assert source is not None
+        assert source["chart"] == "grafana"
+
+    def test_multi_source_helm_chart(self):
+        """A multi-source Application (spec.sources[]) must be found too -
+        this was completely invisible before, since only spec.source was
+        ever checked."""
+        spec = {
+            "sources": [
+                {"chart": "sealed-secrets", "repoURL": "https://bitnami-labs.github.io/sealed-secrets"},
+                {"repoURL": "https://github.com/example/repo", "path": "apps/sealed-secrets"},
+            ]
+        }
+        source = discover_resources._find_helm_source(spec)
+        assert source is not None
+        assert source["chart"] == "sealed-secrets"
+
+    def test_multi_source_chart_not_first(self):
+        """The Helm chart source isn't always sources[0] - must not assume order."""
+        spec = {
+            "sources": [
+                {"repoURL": "https://github.com/example/repo", "path": "apps/foo"},
+                {"chart": "foo", "repoURL": "https://example.com/charts"},
+            ]
+        }
+        source = discover_resources._find_helm_source(spec)
+        assert source is not None
+        assert source["chart"] == "foo"
+
+    def test_git_only_multi_source_no_match(self):
+        """A multi-source app with no Helm chart source at all (e.g. two git
+        sources) should return None, not error."""
+        spec = {
+            "sources": [
+                {"repoURL": "https://github.com/example/repo-a"},
+                {"repoURL": "https://github.com/example/repo-b"},
+            ]
+        }
+        assert discover_resources._find_helm_source(spec) is None
+
+    def test_no_source_or_sources(self):
+        """A spec with neither key should return None, not raise."""
+        assert discover_resources._find_helm_source({}) is None
+
+
+class TestMergeConfigsPreservesUnknownSections:
+    """Tests for merge_configs - covers the top-level section preservation
+    fix. Before this, any existing top-level key not in the hardcoded
+    {argoApps, kustomizeHelmCharts, chartDependencies, dockerImages, ignore}
+    set was silently dropped on every auto-discover run - confirmed against
+    a real repo with a manually-maintained 'helmCharts' section (pre-dating
+    the argoApps/kustomizeHelmCharts/chartDependencies split) that would
+    have been deleted entirely."""
+
+    def test_unknown_section_preserved(self):
+        existing = {
+            "helmCharts": [{"name": "nfs-subdir-external-provisioner", "repository": "https://example.com"}],
+            "dockerImages": [],
+        }
+        discovered = {"dockerImages": []}
+        merged = discover_resources.merge_configs(existing, discovered)
+        assert merged["helmCharts"] == existing["helmCharts"]
+
+    def test_known_sections_not_duplicated_as_unknown(self):
+        """A known section (dockerImages) must go through its normal merge
+        logic, not get double-handled by the preservation fallback."""
+        existing = {
+            "dockerImages": [
+                {
+                    "id": "app",
+                    "registry": "dockerhub",
+                    "repository": "org/app",
+                    "currentTag": "1.0.0",
+                    "file": "app.yaml",
+                    "yamlPath": ["spec", "image"],
+                }
+            ]
+        }
+        discovered = {"dockerImages": []}
+        merged = discover_resources.merge_configs(existing, discovered)
+        assert len(merged["dockerImages"]) == 1
+        assert merged["dockerImages"][0]["id"] == "app"
+
+    def test_ignore_section_still_preserved(self):
+        """Regression guard: 'ignore' already had its own explicit handling
+        before this fix - must keep working unchanged."""
+        existing = {"ignore": {"dockerImages": [{"repository": "some/thing"}]}}
+        discovered = {}
+        merged = discover_resources.merge_configs(existing, discovered)
+        assert merged["ignore"] == existing["ignore"]
