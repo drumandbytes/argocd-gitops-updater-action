@@ -10,6 +10,7 @@ This async version uses:
 """
 
 import asyncio
+import os
 import sys
 from io import StringIO
 from pathlib import Path
@@ -96,12 +97,19 @@ async def discover_argo_apps(root: Path) -> list[dict]:
     """
     yaml_files = list(root.rglob("*.yaml"))
 
-    # Process files concurrently
+    # Process files concurrently. return_exceptions=True so one malformed
+    # manifest can't crash discovery for every other file in the repo -
+    # process_argo_app_file already turns expected bad-input shapes into
+    # None, but this is the backstop for anything it doesn't anticipate.
     tasks = [process_argo_app_file(yaml_file, root) for yaml_file in yaml_files]
-    results = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Filter out None results and sort
-    apps = [app for app in results if app is not None]
+    apps = []
+    for yaml_file, result in zip(yaml_files, results, strict=True):
+        if isinstance(result, Exception):
+            print(f"  [WARN] Failed to process {yaml_file}: {type(result).__name__}: {result}")
+        elif result is not None:
+            apps.append(result)
     return sorted(apps, key=lambda x: x["name"])
 
 
@@ -112,6 +120,13 @@ def _find_helm_source(spec: dict) -> dict | None:
     (spec.sources[]) - a real Application only ever has one or the other,
     never both, per the Argo CD API.
     """
+    if not isinstance(spec, dict):
+        # A manifest with a present-but-null `spec:` parses to None here,
+        # not a missing key - data["spec"] doesn't raise KeyError for that,
+        # so this can't rely on the caller's except (KeyError, TypeError)
+        # alone. Guarding here stops the AttributeError from spec.get(...)
+        # at its source instead.
+        return None
     candidates = []
     single = spec.get("source")
     if isinstance(single, dict):
@@ -267,9 +282,15 @@ def parse_image(image_str: str) -> tuple[str, str, str]:
         ghcr.io/owner/repo:v1.0 -> ("ghcr.io", "owner/repo", "v1.0")
         gcr.io/project/image:tag -> ("gcr.io", "project/image", "tag")
     """
-    # Split off the tag
+    # Split off the tag. A real tag never contains "/" - if the text after
+    # the last colon does, that colon is a registry:port separator (e.g.
+    # "localhost:5000/myimage" with no tag at all), not a tag separator.
     if ":" in image_str:
-        image_part, tag = image_str.rsplit(":", 1)
+        image_part, maybe_tag = image_str.rsplit(":", 1)
+        if "/" in maybe_tag:
+            image_part, tag = image_str, "latest"
+        else:
+            tag = maybe_tag
     else:
         image_part, tag = image_str, "latest"
 
@@ -530,7 +551,10 @@ async def async_main() -> int:
         Exit code (0 for success)
     """
     root = Path.cwd()
-    config_path = root / ".update-config.yaml"
+    # action.yml injects this from the config-path input - previously
+    # ignored entirely, silently forcing every consumer onto
+    # .update-config.yaml regardless of what they configured.
+    config_path = root / os.environ.get("CONFIG_PATH", ".update-config.yaml")
 
     print("Auto-discovering resources in the repository...")
 
@@ -556,9 +580,12 @@ async def async_main() -> int:
     # every auto-discover run. merge_configs() only ever appends new items
     # to existing lists in place rather than rebuilding the structure from
     # scratch, which is what makes this actually work end to end.
-    print(f"Writing configuration to {config_path}...")
-    async with aiofiles.open(config_path, "w", encoding="utf-8") as f:
-        await f.write(dump_yaml_roundtrip(final_config))
+    if "--dry-run" in sys.argv:
+        print(f"[DRY RUN] Would write configuration to {config_path}, skipping actual write.")
+    else:
+        print(f"Writing configuration to {config_path}...")
+        async with aiofiles.open(config_path, "w", encoding="utf-8") as f:
+            await f.write(dump_yaml_roundtrip(final_config))
 
     print("Configuration updated successfully!")
     print("Summary:")

@@ -70,6 +70,18 @@ class TestParseImage:
         assert repo == "app"
         assert tag == "v1"
 
+    def test_custom_registry_with_port_and_no_tag(self):
+        """A registry:port image with NO tag at all used to be misparsed:
+        rsplit(":", 1) on the only colon (the port separator) treated
+        "5000/myimage" as the tag, producing a nonsensical repository
+        ("library/localhost") and tag. A real tag never contains "/" -
+        that's the signal used to tell a port separator apart from a
+        tag separator."""
+        registry, repo, tag = discover_resources.parse_image("localhost:5000/myimage")
+        assert registry == "localhost:5000"
+        assert repo == "myimage"
+        assert tag == "latest"
+
 
 class TestFindContainerImages:
     """Tests for find_container_images_in_yaml function."""
@@ -223,6 +235,16 @@ class TestFindHelmSource:
     def test_no_source_or_sources(self):
         """A spec with neither key should return None, not raise."""
         assert discover_resources._find_helm_source({}) is None
+
+    def test_null_spec_returns_none_instead_of_raising(self):
+        """A manifest with a present-but-null `spec:` parses to Python
+        None here, not a missing key - data["spec"] doesn't raise
+        KeyError for that case, so process_argo_app_file's
+        except (KeyError, TypeError) alone doesn't catch the
+        AttributeError that spec.get(...) on None used to raise. One bad
+        manifest crashed discovery for every file in the repo before this
+        guard existed."""
+        assert discover_resources._find_helm_source(None) is None
 
 
 class TestMergeConfigsPreservesUnknownSections:

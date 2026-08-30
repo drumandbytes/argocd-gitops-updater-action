@@ -1,22 +1,21 @@
 #!/usr/bin/env python
 import asyncio
+import os
 import re
 import sys
 import time
 import traceback
-from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TypeVar
 
 import aiofiles
 import aiohttp
 import yaml
 from packaging.version import InvalidVersion, Version
 
-# Type variable for generic return type in retry_on_rate_limit
-T = TypeVar("T")
-
-CONFIG_PATH = Path(".update-config.yaml")
+# action.yml injects this from the config-path input - previously ignored
+# entirely, silently forcing every consumer onto .update-config.yaml
+# regardless of what they configured.
+CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", ".update-config.yaml"))
 REPORT_PATH = Path(".update-report.txt")
 
 # Async lock for file writes
@@ -108,37 +107,6 @@ def normalize_version_string(tag: str) -> str:
         else:
             break
     return core
-
-
-async def retry_on_rate_limit(coro_func: Callable[[], Awaitable[T]], max_retries: int = 3) -> T | None:
-    """
-    Wrapper to retry async API calls if rate limited (429 error).
-    Uses exponential backoff: 2s, 4s, 8s.
-
-    Args:
-        coro_func: A callable that returns a coroutine (async function to call)
-        max_retries: Maximum number of retry attempts
-
-    Returns:
-        The result of the coroutine, or None if all retries fail
-    """
-    for attempt in range(max_retries):
-        try:
-            return await coro_func()
-        except aiohttp.ClientResponseError as e:
-            if e.status == 429:  # Rate limit exceeded
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** (attempt + 1)  # 2, 4, 8 seconds
-                    print(f"  [WARN] Rate limited, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(wait_time)
-                else:
-                    print(f"  [ERROR] Rate limit exceeded after {max_retries} attempts")
-                    raise
-            else:
-                raise
-        except Exception:
-            raise
-    return None
 
 
 def build_ignore_lookups(ignore_config: dict | None) -> tuple[dict[str, dict], dict[str, dict]]:
@@ -260,6 +228,18 @@ def should_ignore_helm_chart(name: str, version: str, helm_ignore_by_name: dict[
     return False, None
 
 
+def _contains_prerelease_marker(text_lower: str, markers: list[str]) -> bool:
+    """
+    Check if any marker appears as its own token in text_lower, not as a
+    substring of an unrelated word. A plain `marker in text_lower` check
+    (the previous approach) wrongly rejects genuinely stable tags like
+    "1.2.3-arch", "1.2.3-force", or "1.2.3-src" purely because they
+    contain the letters "rc" - this requires no lowercase letter
+    immediately before or after the marker.
+    """
+    return any(re.search(rf"(?<![a-z]){re.escape(marker)}(?![a-z])", text_lower) for marker in markers)
+
+
 def latest_semver(versions: list[str]) -> str | None:
     """
     Find the latest stable semver version from a list.
@@ -272,7 +252,7 @@ def latest_semver(versions: list[str]) -> str | None:
         v_str = str(v)
         # Filter out pre-release versions (alpha, beta, rc)
         v_lower = v_str.lower()
-        if any(marker in v_lower for marker in ["alpha", "beta", "rc", "-pre", ".pre"]):
+        if _contains_prerelease_marker(v_lower, ["alpha", "beta", "rc", "-pre", ".pre"]):
             continue
         try:
             # Normalize version string before parsing
@@ -289,6 +269,58 @@ def latest_semver(versions: list[str]) -> str | None:
         return None
     valid.sort()
     return valid[-1][1]
+
+
+def replace_yaml_scalar_anchored(
+    text: str, anchor_key: str, anchor_value: str, target_key: str, old: str, new: str, list_item: bool = False
+) -> tuple[str, int]:
+    """
+    Replace a YAML scalar value anchored to a preceding sibling field,
+    instead of a blind first-match on the whole file. Matches:
+
+      <anchor_key>: <anchor_value>
+      [optional intermediate fields]
+      <target_key>: <old>
+
+    or, with list_item=True (the anchor field is the one introducing a
+    list entry, e.g. "- name: X"):
+
+      - <anchor_key>: <anchor_value>
+        [optional intermediate fields]
+        <target_key>: <old>
+
+    This avoids the ambiguity of a plain key+value match when the same
+    key/value pair can legitimately appear more than once in the file for
+    a different entry (a second Application source with its own
+    targetRevision, a second helmChart/dependency that happens to
+    currently share the same version string).
+
+    Falls back to the unscoped replace_yaml_scalar if no anchored match is
+    found - e.g. the anchor and target are in a different order than
+    expected - same graceful degradation replace_yaml_new_tag already has,
+    rather than silently doing nothing.
+    """
+    marker = r"-[ \t]*" if list_item else ""
+    pattern = (
+        rf"(^[ \t]*{marker}{re.escape(anchor_key)}:[ \t]*{re.escape(anchor_value)}[ \t]*\n"
+        rf"(?:[ \t]+[a-zA-Z]\w*:[ \t]+[^\n]*\n)*?"
+        rf"[ \t]+{re.escape(target_key)}:[ \t]*)"
+        rf'(["\']?){re.escape(old)}(["\']?)([^\n]*)'
+    )
+
+    def replacer(match):
+        prefix = match.group(1)
+        open_quote = match.group(2)
+        close_quote = match.group(3)
+        suffix = match.group(4)
+        return f"{prefix}{open_quote}{new}{close_quote}{suffix}"
+
+    new_text, count = re.subn(pattern, replacer, text, count=1, flags=re.MULTILINE)
+
+    if count == 0:
+        return replace_yaml_scalar(text, target_key, old, new)
+
+    return new_text, count
 
 
 def replace_yaml_scalar(text: str, key: str, old: str, new: str) -> tuple[str, int]:
@@ -422,25 +454,38 @@ def _find_matching_helm_source(spec: dict, chart_name: str) -> dict | None:
 
 
 async def update_argo_app_chart(
-    file_path: Path, chart_name: str, latest_version: str, dry_run: bool
+    file_path: Path, chart_name: str, latest_version: str, dry_run: bool, known_current: str | None = None
 ) -> tuple[bool, str | None, str | None]:
     """
     Update targetRevision for an Argo CD Application's Helm chart source
     (spec.source or the matching entry in spec.sources[]) without
     re-dumping the whole YAML. Returns (changed, old, new).
+
+    known_current lets a caller that already loaded and parsed this same
+    file (process_argo_app does, for the ignore check) pass the current
+    targetRevision straight through instead of this function re-reading
+    and re-parsing the identical file from disk. That avoided a second
+    read wasn't just wasted I/O: an await (the get_latest_helm_chart_version
+    network call) sits between the two reads while other gathered tasks
+    run, so an independent re-read could in principle observe a version
+    that had already changed underneath the ignore check's snapshot.
     """
-    data = await load_yaml(file_path)
+    if known_current is not None:
+        current = known_current
+    else:
+        data = await load_yaml(file_path)
 
-    try:
-        source = _find_matching_helm_source(data["spec"], chart_name)
-    except (KeyError, TypeError):
-        source = None
+        try:
+            source = _find_matching_helm_source(data["spec"], chart_name)
+        except (KeyError, TypeError):
+            source = None
 
-    if source is None:
-        print(f"  [WARN] {file_path} has no source/sources entry with chart == {chart_name}, skipping")
-        return False, None, None
+        if source is None:
+            print(f"  [WARN] {file_path} has no source/sources entry with chart == {chart_name}, skipping")
+            return False, None, None
 
-    current = str(source.get("targetRevision", ""))
+        current = str(source.get("targetRevision", ""))
+
     if not current:
         print(f"  [WARN] {file_path} has empty targetRevision, skipping")
         return False, None, None
@@ -467,7 +512,14 @@ async def update_argo_app_chart(
     async with FILE_WRITE_LOCK:
         async with aiofiles.open(file_path, encoding="utf-8") as f:
             text = await f.read()
-        new_text, count = replace_yaml_scalar(text, "targetRevision", current, latest_version)
+        # Anchored to this specific source's chart name, not a blind
+        # first-match - a multi-source Application's companion (non-Helm)
+        # source can have its own targetRevision, and if that value
+        # happened to equal the chart's current version, an unscoped
+        # replace would silently repoint the wrong source.
+        new_text, count = replace_yaml_scalar_anchored(
+            text, "chart", chart_name, "targetRevision", current, latest_version
+        )
         if count == 0:
             print(f"  [WARN] Could not replace targetRevision in {file_path} (no matching line), skipping write")
             return False, None, None
@@ -529,7 +581,13 @@ async def update_kustomize_helm_chart(
     async with FILE_WRITE_LOCK:
         async with aiofiles.open(file_path, encoding="utf-8") as f:
             text = await f.read()
-        new_text, count = replace_yaml_scalar(text, "version", target_current, latest_version)
+        # Anchored to this entry's own name - a plain "version" match would
+        # hit the first "version: <old>" line in the file regardless of
+        # which chart/dependency it belongs to, mis-bumping a different
+        # entry if two currently share the same version string.
+        new_text, count = replace_yaml_scalar_anchored(
+            text, "name", chart_name, "version", target_current, latest_version, list_item=True
+        )
         if count == 0:
             print(f"  [WARN] Could not find 'version: {target_current}' in {file_path} for chart {chart_name}")
             return False, None, None
@@ -591,7 +649,13 @@ async def update_chart_yaml(
     async with FILE_WRITE_LOCK:
         async with aiofiles.open(file_path, encoding="utf-8") as f:
             text = await f.read()
-        new_text, count = replace_yaml_scalar(text, "version", target_current, latest_version)
+        # Anchored to this entry's own name - a plain "version" match would
+        # hit the first "version: <old>" line in the file regardless of
+        # which chart/dependency it belongs to, mis-bumping a different
+        # entry if two currently share the same version string.
+        new_text, count = replace_yaml_scalar_anchored(
+            text, "name", chart_name, "version", target_current, latest_version, list_item=True
+        )
         if count == 0:
             print(f"  [WARN] Could not find 'version: {target_current}' in {file_path} for chart {chart_name}")
             return False, None, None
@@ -635,7 +699,7 @@ async def process_argo_app(
             print(f"  [WARN] No valid versions found in {repo_url} for {name}")
             return changed_files, helm_changes, None
 
-        changed, old, new = await update_argo_app_chart(file_path, name, latest, dry_run)
+        changed, old, new = await update_argo_app_chart(file_path, name, latest, dry_run, known_current=current_version)
         if changed:
             changed_files.add(str(file_path))
             helm_changes.append(
@@ -904,8 +968,7 @@ def is_tag_candidate(tag: str, required_variant: str | None = None) -> bool:
         return True
 
     t_lower = tag.lower()
-    bad_markers = ["alpha", "beta", "rc"]
-    if any(m in t_lower for m in bad_markers):
+    if _contains_prerelease_marker(t_lower, ["alpha", "beta", "rc"]):
         return False
 
     # Check variant matching - variants must match exactly (including None)
@@ -1376,8 +1439,14 @@ async def update_single_docker_image(
             print(f"  [SKIP] {reason}")
             return False, None, None, None
 
-        # Get registry-specific semaphore for rate limiting
-        semaphore = REGISTRY_SEMAPHORES.get(registry)
+        # Get registry-specific semaphore for rate limiting. setdefault, not
+        # get - a registry outside the 4 explicitly configured ones used to
+        # fall through to no rate limiting at all (REGISTRY_SEMAPHORES.get
+        # returning None was treated as "don't limit"), risking real bans
+        # against a private/self-hosted registry. This gives every other
+        # registry its own persistent semaphore at DEFAULT_REGISTRY_LIMIT
+        # instead, the constant this was already defined for but never used.
+        semaphore = REGISTRY_SEMAPHORES.setdefault(registry, asyncio.Semaphore(DEFAULT_REGISTRY_LIMIT))
 
         best_same_tag, best_same_ver, best_any_tag, best_any_ver = await find_best_tags_for_same_major(
             session, registry, repository, current_tag, semaphore, entry, docker_ignore_by_id
