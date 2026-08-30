@@ -83,6 +83,27 @@ async def discover_argo_apps(root: Path) -> list[dict]:
     return sorted(apps, key=lambda x: x["name"])
 
 
+def _find_helm_source(spec: dict) -> dict | None:
+    """
+    Find a Helm chart source on an Argo CD Application spec, checking both
+    the legacy single-source shape (spec.source) and the multi-source shape
+    (spec.sources[]) - a real Application only ever has one or the other,
+    never both, per the Argo CD API.
+    """
+    candidates = []
+    single = spec.get("source")
+    if isinstance(single, dict):
+        candidates.append(single)
+    multi = spec.get("sources")
+    if isinstance(multi, list):
+        candidates.extend(s for s in multi if isinstance(s, dict))
+
+    for source in candidates:
+        if source.get("chart") and source.get("repoURL"):
+            return source
+    return None
+
+
 async def process_argo_app_file(yaml_file: Path, root: Path) -> dict | None:
     """Process a single YAML file to check if it's an Argo CD Application."""
     data = await load_yaml_safe(yaml_file)
@@ -93,25 +114,24 @@ async def process_argo_app_file(yaml_file: Path, root: Path) -> dict | None:
     if data.get("kind") != "Application":
         return None
 
-    # Check if it uses a Helm chart
     try:
-        source = data["spec"]["source"]
-        chart = source.get("chart")
-        repo_url = source.get("repoURL")
+        source = _find_helm_source(data["spec"])
+        if source is None:
+            return None
 
-        if chart and repo_url:
-            # Only include Helm chart repos (URLs starting with http/https)
-            # Skip git repositories (ending with .git)
-            if not repo_url.startswith("http"):
-                return None
-            if repo_url.endswith(".git"):
-                return None
+        chart = source["chart"]
+        repo_url = source["repoURL"]
 
-            return {"name": chart, "repoUrl": repo_url, "file": str(yaml_file.relative_to(root))}
+        # Only include Helm chart repos (URLs starting with http/https)
+        # Skip git repositories (ending with .git)
+        if not repo_url.startswith("http"):
+            return None
+        if repo_url.endswith(".git"):
+            return None
+
+        return {"name": chart, "repoUrl": repo_url, "file": str(yaml_file.relative_to(root))}
     except (KeyError, TypeError):
         return None
-
-    return None
 
 
 async def discover_kustomize_helm_charts(root: Path) -> list[dict]:
@@ -502,6 +522,21 @@ def merge_configs(existing: dict, discovered: dict) -> dict:
         for section, count in ignored_count.items():
             if count > 0:
                 print(f"  - {section}: {count}")
+
+    # Preserve any other top-level keys from the existing config untouched -
+    # this function only knows how to discover/merge the 4 sections above
+    # plus "ignore". Anything else (a section this script's schema doesn't
+    # cover, a manually-added top-level key, a stale/renamed section from
+    # before a schema change) would otherwise be silently dropped from the
+    # rewritten file. Confirmed real: a repo with an existing manually
+    # maintained "helmCharts" section (pre-dating the argoApps/
+    # kustomizeHelmCharts/chartDependencies split) would have had that
+    # section deleted entirely by this merge, with no warning.
+    known_keys = {"ignore", "argoApps", "kustomizeHelmCharts", "chartDependencies", "dockerImages"}
+    for key, value in existing.items():
+        if key not in known_keys and key not in merged:
+            merged[key] = value
+            print(f"  [PRESERVE] Unrecognized existing section '{key}' carried over as-is")
 
     return merged
 

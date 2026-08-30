@@ -399,23 +399,45 @@ async def get_latest_helm_chart_version(session: aiohttp.ClientSession, repo_url
     return latest_semver(versions)
 
 
+def _find_matching_helm_source(spec: dict, chart_name: str) -> dict | None:
+    """
+    Find the source on an Argo CD Application spec whose chart matches
+    chart_name, checking both the legacy single-source shape (spec.source)
+    and the multi-source shape (spec.sources[]) - a multi-source app
+    typically pairs a Helm chart source with a companion git/directory
+    source, so this must match on chart name rather than assume index 0.
+    """
+    candidates = []
+    single = spec.get("source")
+    if isinstance(single, dict):
+        candidates.append(single)
+    multi = spec.get("sources")
+    if isinstance(multi, list):
+        candidates.extend(s for s in multi if isinstance(s, dict))
+
+    for source in candidates:
+        if source.get("chart") == chart_name:
+            return source
+    return None
+
+
 async def update_argo_app_chart(
     file_path: Path, chart_name: str, latest_version: str, dry_run: bool
 ) -> tuple[bool, str | None, str | None]:
     """
-    Update spec.source.targetRevision for an Argo CD Application without
+    Update targetRevision for an Argo CD Application's Helm chart source
+    (spec.source or the matching entry in spec.sources[]) without
     re-dumping the whole YAML. Returns (changed, old, new).
     """
     data = await load_yaml(file_path)
 
     try:
-        source = data["spec"]["source"]
+        source = _find_matching_helm_source(data["spec"], chart_name)
     except (KeyError, TypeError):
-        print(f"  [WARN] {file_path} has no spec.source, skipping")
-        return False, None, None
+        source = None
 
-    if source.get("chart") != chart_name:
-        print(f"  [WARN] {file_path} spec.source.chart != {chart_name}, skipping")
+    if source is None:
+        print(f"  [WARN] {file_path} has no source/sources entry with chart == {chart_name}, skipping")
         return False, None, None
 
     current = str(source.get("targetRevision", ""))
@@ -597,7 +619,9 @@ async def process_argo_app(
         data = await load_yaml(file_path)
         current_version = ""
         try:
-            current_version = str(data["spec"]["source"].get("targetRevision", ""))
+            matched_source = _find_matching_helm_source(data["spec"], name)
+            if matched_source is not None:
+                current_version = str(matched_source.get("targetRevision", ""))
         except (KeyError, TypeError):
             pass
 
@@ -927,11 +951,17 @@ async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> 
     dockerhub_token = os.environ.get("DOCKERHUB_TOKEN") or os.environ.get("DOCKERHUB_PASSWORD")
 
     token_url = f"https://auth.docker.io/token?service=registry.docker.io&scope=repository:{api_repo}:pull"
-    auth = aiohttp.BasicAuth(dockerhub_username, dockerhub_token) if dockerhub_username and dockerhub_token else None
+    # aiohttp.BasicAuth + the auth= kwarg are both deprecated, removed in
+    # aiohttp 4.0 - aiohttp.encode_basic_auth() is the library's own named
+    # replacement (confirmed against aiohttp's current source, not just
+    # the deprecation message).
+    auth_headers = {}
+    if dockerhub_username and dockerhub_token:
+        auth_headers["Authorization"] = aiohttp.encode_basic_auth(dockerhub_username, dockerhub_token)
 
     bearer_token = None
     try:
-        async with session.get(token_url, auth=auth, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+        async with session.get(token_url, headers=auth_headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
             resp.raise_for_status()
             token_data = await resp.json()
             bearer_token = token_data.get("token") or token_data.get("access_token")
@@ -1004,11 +1034,13 @@ async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> lis
 
     github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     token_url = f"https://ghcr.io/token?service=ghcr.io&scope=repository:{repository}:pull"
-    auth = aiohttp.BasicAuth("token", github_token) if github_token else None
+    auth_headers = {}
+    if github_token:
+        auth_headers["Authorization"] = aiohttp.encode_basic_auth("token", github_token)
 
     bearer_token = None
     try:
-        async with session.get(token_url, auth=auth, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+        async with session.get(token_url, headers=auth_headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
             resp.raise_for_status()
             token_data = await resp.json()
             bearer_token = token_data.get("token") or token_data.get("access_token")

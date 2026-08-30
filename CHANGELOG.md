@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Discovery and version-checking for Argo CD Applications now also check the multi-source shape (`spec.sources[]`), not just the legacy single-source shape (`spec.source`). Every multi-source Helm-chart Application was previously invisible to both `discover-resources.py` and `update-versions.py` - confirmed against a real consuming repo where this meant zero Helm charts were ever discovered or updated.
+- `discover-resources.py`'s config merge no longer silently drops top-level sections it doesn't recognize (e.g. a `helmCharts` section pre-dating the `argoApps`/`kustomizeHelmCharts`/`chartDependencies` split). They're now preserved as-is with a log line, instead of being deleted from `.update-config.yaml` on the next auto-discover run.
+- Replaced the deprecated `aiohttp.BasicAuth` + `auth=` kwarg (removed in aiohttp 4.0) with `aiohttp.encode_basic_auth()` + `headers=`, per aiohttp's own deprecation guidance, in both the Docker Hub and GHCR token-exchange requests.
+
 ## [2.1.0]
 
 ### Added
