@@ -187,7 +187,7 @@ runs:
       if: inputs.auto-discover == 'true' && steps.discovery-changes.outputs.changes == 'true' && inputs.create-pr == 'true' && inputs.dry-run == 'false'
       uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
       with:
-        token: ${{ github.token }}
+        token: ${{ inputs.github-token }}
         commit-message: "chore: auto-discover new resources"
         title: "chore: auto-discover new Helm charts & Docker images"
         body: |
@@ -283,7 +283,7 @@ runs:
       if: inputs.create-pr == 'true' && steps.check-changes.outputs.changes == 'true' && inputs.dry-run == 'false'
       uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
       with:
-        token: ${{ github.token }}
+        token: ${{ inputs.github-token }}
         commit-message: ${{ inputs.commit-message }}
         title: ${{ inputs.pr-title }}
         body: |
