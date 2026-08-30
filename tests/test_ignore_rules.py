@@ -60,11 +60,7 @@ class TestBuildIgnoreLookups:
 
     def test_compiled_patterns(self):
         """Test that regex patterns are pre-compiled."""
-        config = {
-            "dockerImages": [
-                {"id": "test", "versionPattern": r"^\d+\.\d+$", "tagPattern": r".*-alpine"}
-            ]
-        }
+        config = {"dockerImages": [{"id": "test", "versionPattern": r"^\d+\.\d+$", "tagPattern": r".*-alpine"}]}
         docker_ignore, _ = update_versions.build_ignore_lookups(config)
 
         rule = docker_ignore["test"]
