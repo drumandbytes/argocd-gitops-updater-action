@@ -12,24 +12,19 @@ import aiohttp
 import yaml
 from packaging.version import InvalidVersion, Version
 
-# action.yml injects this from the config-path input - previously ignored
-# entirely, silently forcing every consumer onto .update-config.yaml
-# regardless of what they configured.
+# action.yml injects CONFIG_PATH from the config-path input; without this the
+# path was hard-coded and every consumer got forced onto .update-config.yaml.
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", ".update-config.yaml"))
 REPORT_PATH = Path(".update-report.txt")
 
-# Async lock for file writes
 FILE_WRITE_LOCK = asyncio.Lock()
 
-# Helm chart concurrency limit to avoid overwhelming DNS and network
-# Even though Helm and Docker run sequentially, concurrent Helm requests can still cause issues
+# Concurrent Helm requests still hammer DNS/network even though Helm and Docker
+# phases run sequentially. Semaphores are created in async_main().
 HELM_CONCURRENCY_LIMIT = 5
-
-# Helm chart semaphore for rate limiting (will be initialized in main)
 HELM_SEMAPHORE: asyncio.Semaphore | None = None
 
-# Per-registry concurrency limits to avoid rate limiting
-# These limits are conservative to stay well below API rate limits
+# Per-registry concurrency caps, conservative vs. each registry's rate limit.
 REGISTRY_LIMITS = {
     "dockerhub": 3,  # Docker Hub is most restrictive (100 req/6h anonymous)
     "ghcr.io": 10,  # GitHub has generous limits (5000 req/h with token)
@@ -37,68 +32,44 @@ REGISTRY_LIMITS = {
     "gcr.io": 5,  # GCR is lenient
 }
 DEFAULT_REGISTRY_LIMIT = 5
-
-# Registry-specific semaphores for rate limiting (will be initialized in main)
 REGISTRY_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
 
-# Compiled regex patterns for version normalization (module-level for performance)
-# These patterns convert non-standard version formats to PEP 440 format
+# Non-standard version tags → PEP 440
 PATTERN_P_SUFFIX = re.compile(r"^v?(\d+\.\d+\.\d+)-p(\d+)$")  # v1.24.1-p1 → 1.24.1.post1
 PATTERN_DEBIAN_REV = re.compile(r"^v?(\d+\.\d+\.\d+)-(\d+)$")  # v1.24.1-2 → 1.24.1.post2
 PATTERN_SIMPLE = re.compile(r"^v?(\d+\.\d+\.\d+)$")  # v1.24.1 → 1.24.1
 
 
 async def load_yaml(path: Path) -> dict:
-    """Load YAML file asynchronously."""
     async with aiofiles.open(path, encoding="utf-8") as f:
         content = await f.read()
         return yaml.safe_load(content)
 
 
 def normalize_version_string(tag: str) -> str:
-    """
-    Normalize version tags to PEP 440 format for consistent parsing.
+    """Normalize a version tag to PEP 440.
 
-    Handles common non-standard versioning patterns:
-    - Docker image patches: v1.24.1-p1 → 1.24.1.post1 (pgbouncer, custom images)
-    - Debian revisions: v1.24.1-2 → 1.24.1.post2 (Debian/Ubuntu packages)
-    - Simple semver: v1.24.1 → 1.24.1 (strip v prefix)
-    - Variants: 1.24.1-alpine → 1.24.1 (extract core, handled by fallback)
+    Docker patch suffixes (-p1) and Debian revisions (-2) become .postN;
+    variant tags (1.24.1-alpine3.19) collapse to their numeric core.
 
-    Args:
-        tag: Version tag string to normalize
-
-    Returns:
-        Normalized version string compatible with PEP 440
-
-    Examples:
         >>> normalize_version_string("v1.24.1-p1")
         '1.24.1.post1'
-        >>> normalize_version_string("v1.24.1")
-        '1.24.1'
         >>> normalize_version_string("1.24.1-alpine")
         '1.24.1'
     """
-    # Fast path 1: -pN suffix (Docker image patches like pgbouncer)
-    # Matches: v1.24.1-p1, 1.24.1-p2, etc.
-    m = PATTERN_P_SUFFIX.match(tag)
+    m = PATTERN_P_SUFFIX.match(tag)  # -pN, e.g. pgbouncer
     if m:
         return f"{m.group(1)}.post{m.group(2)}"
 
-    # Fast path 2: -N suffix (Debian package revisions)
-    # Matches: v1.24.1-2, 1.24.1-1, etc. (but not variants like -alpine)
-    m = PATTERN_DEBIAN_REV.match(tag)
+    m = PATTERN_DEBIAN_REV.match(tag)  # -N (not -alpine etc.)
     if m:
         return f"{m.group(1)}.post{m.group(2)}"
 
-    # Fast path 3: Simple semver (no suffix)
-    # Matches: v1.24.1, 1.24.1, etc.
     m = PATTERN_SIMPLE.match(tag)
     if m:
         return m.group(1)
 
-    # Fallback: extract core for variants (-alpine, -debian, etc.)
-    # This handles tags like 1.24.1-alpine3.19 by extracting just 1.24.1
+    # variant tag: keep the leading [0-9.] run
     tag = tag.lstrip("v")
     core = ""
     for ch in tag:
@@ -110,23 +81,16 @@ def normalize_version_string(tag: str) -> str:
 
 
 def build_ignore_lookups(ignore_config: dict | None) -> tuple[dict[str, dict], dict[str, dict]]:
-    """
-    Build optimized lookup structures for ignore rules with pre-compiled regex patterns.
-
-    Returns:
-        (docker_ignore_by_id, helm_ignore_by_name) - O(1) lookup dicts with compiled patterns
-    """
+    """Build (docker_ignore_by_id, helm_ignore_by_name) lookups with compiled patterns."""
     docker_ignore_by_id = {}
     helm_ignore_by_name = {}
 
     if not ignore_config:
         return docker_ignore_by_id, helm_ignore_by_name
 
-    # Process Docker image ignore rules
     docker_ignores = ignore_config.get("dockerImages", [])
     for ignore_rule in docker_ignores:
         if "id" in ignore_rule:
-            # Pre-compile regex patterns for performance
             processed_rule = ignore_rule.copy()
             rule_id = ignore_rule["id"]
 
@@ -146,7 +110,6 @@ def build_ignore_lookups(ignore_config: dict | None) -> tuple[dict[str, dict], d
 
             docker_ignore_by_id[ignore_rule["id"]] = processed_rule
 
-    # Process Helm chart ignore rules
     helm_ignores = ignore_config.get("helmCharts", [])
     for ignore_rule in helm_ignores:
         if "name" in ignore_rule:
@@ -166,32 +129,18 @@ def build_ignore_lookups(ignore_config: dict | None) -> tuple[dict[str, dict], d
 
 
 def should_ignore_docker_image(entry: dict, tag: str, docker_ignore_by_id: dict[str, dict]) -> tuple[bool, str | None]:
-    """
-    Check if a Docker image should be ignored based on ignore configuration.
-
-    Args:
-        entry: Docker image entry from config
-        tag: Current tag of the image
-        docker_ignore_by_id: Pre-built lookup dict with compiled regex patterns
-
-    Returns:
-        (should_ignore: bool, reason: str)
-    """
+    """(should_ignore, reason) for a docker image entry against the ignore rules."""
     if not docker_ignore_by_id:
         return False, None
 
-    # O(1) lookup by ID
     entry_id = entry.get("id")
     if entry_id and entry_id in docker_ignore_by_id:
         ignore_rule = docker_ignore_by_id[entry_id]
 
-        # If there's a versionPattern, don't skip the image entirely
-        # The pattern will be used to filter out specific versions during tag selection
+        # a versionPattern filters individual tags later, so don't skip the whole image here
         if "versionPattern" not in ignore_rule:
-            # No version pattern means ignore all versions of this image
             return True, f"ignored by ID: {ignore_rule['id']}"
 
-        # Check tag pattern if present (uses pre-compiled regex)
         if "_compiled_tag_pattern" in ignore_rule:
             if ignore_rule["_compiled_tag_pattern"].match(tag):
                 return True, f"ignored by ID + tag pattern: {ignore_rule['id']}"
@@ -200,25 +149,13 @@ def should_ignore_docker_image(entry: dict, tag: str, docker_ignore_by_id: dict[
 
 
 def should_ignore_helm_chart(name: str, version: str, helm_ignore_by_name: dict[str, dict]) -> tuple[bool, str | None]:
-    """
-    Check if a Helm chart should be ignored based on ignore configuration.
-
-    Args:
-        name: Helm chart name
-        version: Current version of the chart
-        helm_ignore_by_name: Pre-built lookup dict with compiled regex patterns
-
-    Returns:
-        (should_ignore: bool, reason: str)
-    """
+    """(should_ignore, reason) for a helm chart against the ignore rules."""
     if not helm_ignore_by_name:
         return False, None
 
-    # O(1) lookup by name
     if name in helm_ignore_by_name:
         ignore_rule = helm_ignore_by_name[name]
 
-        # Check if there's a version pattern (uses pre-compiled regex)
         if "_compiled_version_pattern" in ignore_rule:
             if ignore_rule["_compiled_version_pattern"].match(version):
                 return True, f"ignored by name + version pattern: {name} with version {ignore_rule['versionPattern']}"
@@ -250,17 +187,14 @@ def latest_semver(versions: list[str]) -> str | None:
     valid = []
     for v in versions:
         v_str = str(v)
-        # Filter out pre-release versions (alpha, beta, rc)
         v_lower = v_str.lower()
         if _contains_prerelease_marker(v_lower, ["alpha", "beta", "rc", "-pre", ".pre"]):
             continue
         try:
-            # Normalize version string before parsing
             normalized = normalize_version_string(v_str)
             if not normalized:
                 continue
             parsed = Version(normalized)
-            # Also filter out versions marked as pre-release by packaging
             if not parsed.is_prerelease:
                 valid.append((parsed, v_str))
         except InvalidVersion:
@@ -332,8 +266,6 @@ def replace_yaml_scalar(text: str, key: str, old: str, new: str) -> tuple[str, i
       - key: "value"
       - key: 'value'
     """
-    # Try to match with optional quotes around the value
-    # Pattern: key: "old" or key: 'old' or key: old
     pattern = rf'^(\s*{re.escape(key)}\s*:\s*)(["\']?){re.escape(old)}(["\']?)(.*)$'
 
     def replacer(match):
@@ -370,8 +302,6 @@ def replace_yaml_new_tag(text: str, image_name: str, old: str, new: str) -> tupl
     And replaces <old> with <new>, preserving quotes. This avoids ambiguity when multiple
     images entries share the same newTag value.
     """
-    # Match "- name: <image_name>" line, then optional intermediate fields, then "newTag: <old>"
-    # Uses [ \t] instead of \s to avoid matching newlines in wrong places
     pattern = (
         rf"(^[ \t]*-[ \t]*name:[ \t]*{re.escape(image_name)}[ \t]*\n"
         rf"(?:[ \t]+[a-zA-Z]\w*:[ \t]+[^\n]*\n)*?"
@@ -402,9 +332,7 @@ async def get_latest_helm_chart_version(session: aiohttp.ClientSession, repo_url
     """Get the latest Helm chart version from a repository."""
     index_url = repo_url.rstrip("/") + "/index.yaml"
 
-    # Use semaphore to limit concurrent Helm chart requests
     async with HELM_SEMAPHORE:
-        # Retry logic for transient network errors
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -414,7 +342,7 @@ async def get_latest_helm_chart_version(session: aiohttp.ClientSession, repo_url
                 break
             except (TimeoutError, aiohttp.ClientError) as e:
                 if attempt < max_retries - 1:
-                    wait_time = 2**attempt  # Exponential backoff: 1s, 2s, 4s
+                    wait_time = 2**attempt
                     error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
                     print(
                         f"  [WARN] Helm chart request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}"
@@ -492,7 +420,6 @@ async def update_argo_app_chart(
 
     print(f"  {file_path}: current={current}, latest={latest_version}")
     try:
-        # Normalize both versions before comparison to handle -pN suffixes, etc.
         latest_normalized = normalize_version_string(latest_version)
         current_normalized = normalize_version_string(current)
         if Version(latest_normalized) <= Version(current_normalized):
@@ -508,7 +435,6 @@ async def update_argo_app_chart(
     if dry_run:
         return True, current, latest_version
 
-    # Async file write with lock
     async with FILE_WRITE_LOCK:
         async with aiofiles.open(file_path, encoding="utf-8") as f:
             text = await f.read()
@@ -555,7 +481,6 @@ async def update_kustomize_helm_chart(
 
         print(f"  {file_path} ({chart_name}): current={current}, latest={latest_version}")
         try:
-            # Normalize both versions before comparison to handle -pN suffixes, etc.
             latest_normalized = normalize_version_string(latest_version)
             current_normalized = normalize_version_string(current)
             if Version(latest_normalized) <= Version(current_normalized):
@@ -577,7 +502,6 @@ async def update_kustomize_helm_chart(
     if dry_run:
         return True, target_current, latest_version
 
-    # Async file write with lock
     async with FILE_WRITE_LOCK:
         async with aiofiles.open(file_path, encoding="utf-8") as f:
             text = await f.read()
@@ -623,7 +547,6 @@ async def update_chart_yaml(
 
         print(f"  {file_path} ({chart_name}): current={current}, latest={latest_version}")
         try:
-            # Normalize both versions before comparison to handle -pN suffixes, etc.
             latest_normalized = normalize_version_string(latest_version)
             current_normalized = normalize_version_string(current)
             if Version(latest_normalized) <= Version(current_normalized):
@@ -645,7 +568,6 @@ async def update_chart_yaml(
     if dry_run:
         return True, target_current, latest_version
 
-    # Async file write with lock
     async with FILE_WRITE_LOCK:
         async with aiofiles.open(file_path, encoding="utf-8") as f:
             text = await f.read()
@@ -679,7 +601,6 @@ async def process_argo_app(
     print(f"\n[ARGO APP] {name} in {file_path}")
 
     try:
-        # Check current version to see if ignored
         data = await load_yaml(file_path)
         current_version = ""
         try:
@@ -733,7 +654,7 @@ async def process_kustomize_chart(
     print(f"\n[KUSTOMIZE] {name}")
 
     try:
-        # For kustomize, we'll check with empty version (can add more sophisticated check if needed)
+        # kustomize path has no cheap current-version read; pass "" and check unconditionally
         ignored, reason = should_ignore_helm_chart(name, "", helm_ignore_by_name)
         if ignored:
             print(f"  [SKIP] {reason}")
@@ -780,7 +701,6 @@ async def process_chart_dependency(
     print(f"\n[CHART.YAML] {name}")
 
     try:
-        # Check if chart is ignored
         ignored, reason = should_ignore_helm_chart(name, "", helm_ignore_by_name)
         if ignored:
             print(f"  [SKIP] {reason}")
@@ -833,7 +753,6 @@ async def update_helm_charts(
     if not all_tasks:
         return changed_files, helm_changes
 
-    # Process Helm charts concurrently using asyncio.gather
     tasks = []
     for task_type, item in all_tasks:
         if task_type == "argo":
@@ -844,10 +763,8 @@ async def update_helm_charts(
             task = process_chart_dependency(session, item, helm_ignore_by_name, dry_run)
         tasks.append(task)
 
-    # Gather all results
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Process results
     for result in results:
         if isinstance(result, Exception):
             print(
@@ -858,7 +775,6 @@ async def update_helm_charts(
             files, changes, error = result
             changed_files.update(files)
             helm_changes.extend(changes)
-            # Error is already logged in the processing function, no need to print again
 
     return changed_files, helm_changes
 
@@ -890,23 +806,10 @@ def extract_semver_core(tag: str) -> str | None:
 
 
 def parse_semver_from_tag(tag: str) -> Version | None:
-    """
-    Parse a version tag into a packaging.version.Version object.
+    """Parse a tag to a Version via normalize_version_string(), or None.
 
-    Uses normalize_version_string() to handle non-standard version formats
-    like Docker image patches (-p1) and Debian package revisions (-2).
-
-    Args:
-        tag: Version tag string to parse
-
-    Returns:
-        Version object if parsing succeeds, None otherwise
-
-    Examples:
         >>> parse_semver_from_tag("v1.24.1-p1")
         <Version('1.24.1.post1')>
-        >>> parse_semver_from_tag("1.24.1-alpine")
-        <Version('1.24.1')>
     """
     normalized = normalize_version_string(tag)
     if not normalized:
@@ -930,23 +833,18 @@ def extract_variant_pattern(tag: str) -> str | None:
 
     Returns the variant type (alpine, debian, slim, etc.) or None if no variant.
     """
-    # First extract the version prefix
     core = extract_semver_core(tag)
     if not core:
         return None
 
-    # Get everything after the version
     remainder = tag[len(core) :]
     if not remainder:
         return None
 
-    # Remove leading dash if present
     remainder = remainder.lstrip("-")
     if not remainder:
         return None
 
-    # Extract the variant name (first word/identifier)
-    # Common patterns: alpine, debian, slim, bookworm, bullseye, etc.
     variant_match = re.match(r"^([a-zA-Z]+)", remainder)
     if variant_match:
         return variant_match.group(1).lower()
@@ -971,9 +869,6 @@ def is_tag_candidate(tag: str, required_variant: str | None = None) -> bool:
     if _contains_prerelease_marker(t_lower, ["alpha", "beta", "rc"]):
         return False
 
-    # Check variant matching - variants must match exactly (including None)
-    # If current tag has no variant, only accept tags with no variant
-    # If current tag has "alpine", only accept tags with "alpine"
     tag_variant = extract_variant_pattern(tag)
     if tag_variant != required_variant:
         return False
@@ -1002,7 +897,6 @@ async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> 
     Supports authentication via DOCKERHUB_USERNAME and DOCKERHUB_TOKEN
     environment variables for the higher authenticated rate limit.
     """
-    import os
 
     # Official single-name images (e.g. "nginx", "redis") live under the
     # "library/" namespace on the actual registry, even though Docker Hub's
@@ -1039,7 +933,6 @@ async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> 
     url = f"https://registry-1.docker.io/v2/{api_repo}/tags/list?n=1000"
 
     while url:
-        # Retry logic for transient network errors
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -1062,7 +955,7 @@ async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> 
                 break
             except (TimeoutError, aiohttp.ClientError) as e:
                 if attempt < max_retries - 1:
-                    wait_time = 2**attempt  # Exponential backoff: 1s, 2s, 4s
+                    wait_time = 2**attempt
                     error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
                     print(
                         f"  [WARN] Docker Hub request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}"
@@ -1093,7 +986,6 @@ async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> lis
     seconds. A real bearer token has to be obtained from ghcr.io's own
     /token endpoint first, per the standard Docker Registry v2 auth flow.
     """
-    import os
 
     github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     token_url = f"https://ghcr.io/token?service=ghcr.io&scope=repository:{repository}:pull"
@@ -1120,7 +1012,6 @@ async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> lis
 
     try:
         while url:
-            # Retry logic for transient network errors
             max_retries = 3
             for attempt in range(max_retries):
                 try:
@@ -1170,7 +1061,6 @@ async def list_quay_tags(session: aiohttp.ClientSession, repository: str) -> lis
 
     try:
         while url:
-            # Retry logic for transient network errors
             max_retries = 3
             for attempt in range(max_retries):
                 try:
@@ -1183,7 +1073,6 @@ async def list_quay_tags(session: aiohttp.ClientSession, repository: str) -> lis
                             if name:
                                 tags.append(name)
 
-                        # Check if there are more pages
                         if data.get("has_additional"):
                             page = data.get("page", 1) + 1
                             url = f"https://quay.io/api/v1/repository/{repository}/tag/?limit=100&page={page}"
@@ -1214,11 +1103,9 @@ async def list_gcr_tags(session: aiohttp.ClientSession, repository: str) -> list
     Uses Docker Registry HTTP API V2.
     Note: Only works for public images.
     """
-    # gcr.io uses Docker Registry V2 API
     url = f"https://gcr.io/v2/{repository}/tags/list"
 
     try:
-        # Retry logic for transient network errors
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -1289,20 +1176,9 @@ async def find_best_tags_for_same_major(
     entry: dict | None = None,
     docker_ignore_by_id: dict[str, dict] | None = None,
 ) -> tuple[str | None, Version | None, str | None, Version | None]:
-    """
-    Find the best tags for the same major version.
+    """Return (best_same_tag, best_same_ver, best_any_tag, best_any_ver).
 
-    Args:
-        session: The aiohttp client session
-        registry: The container registry (dockerhub, ghcr.io, etc.)
-        repository: The repository path
-        current_tag: The current tag to compare against
-        semaphore: Optional semaphore for rate limiting
-        entry: Docker image entry (for ignore pattern matching)
-        docker_ignore_by_id: Pre-built lookup dict for version pattern filtering
-
-    Returns:
-        Tuple of (best_same_tag, best_same_ver, best_any_tag, best_any_ver)
+    "same" = same major as current_tag; "any" surfaces a major bump to report.
     """
     current_ver = parse_semver_from_tag(current_tag)
     if current_ver is None:
@@ -1314,7 +1190,6 @@ async def find_best_tags_for_same_major(
     if current_variant:
         print(f"  [INFO] Detected image variant: {current_variant} (will only consider {current_variant} tags)")
 
-    # Use semaphore if provided for rate limiting
     if semaphore:
         async with semaphore:
             tags = await list_registry_tags(session, registry, repository)
@@ -1325,7 +1200,6 @@ async def find_best_tags_for_same_major(
         print(f"  [WARN] No tags found in registry {registry} for repo {repository}")
         return None, None, None, None
 
-    # Filter tags based on versionPattern in ignore rules (using pre-compiled regex)
     if entry and docker_ignore_by_id:
         entry_id = entry.get("id")
         if entry_id and entry_id in docker_ignore_by_id:
@@ -1344,7 +1218,6 @@ async def find_best_tags_for_same_major(
     all_versions: list[tuple[Version, str]] = []
 
     for t in tags:
-        # Filter by variant if current tag has one
         if not is_tag_candidate(t, required_variant=current_variant):
             continue
 
@@ -1402,7 +1275,6 @@ async def update_single_docker_image(
 
         data = await load_yaml(file_path)
 
-        # follow yamlPath to get current value
         cur = data
         for key in yaml_path:
             cur = cur[key]
@@ -1433,7 +1305,6 @@ async def update_single_docker_image(
 
         print(f"  Current {'tag' if is_new_tag_field else 'image'}: {current_value}")
 
-        # Check if this image should be ignored
         ignored, reason = should_ignore_docker_image(entry, current_tag, docker_ignore_by_id)
         if ignored:
             print(f"  [SKIP] {reason}")
@@ -1455,7 +1326,7 @@ async def update_single_docker_image(
         current_ver = parse_semver_from_tag(current_tag)
         major_available = None
         if current_ver and best_any_ver and best_any_ver.major > current_ver.major:
-            # Check if the best_any_tag matches versionPattern (should be ignored, using pre-compiled regex)
+            # don't report a major bump that an ignore rule's versionPattern would filter
             should_skip_major = False
             entry_id = entry.get("id")
             if docker_ignore_by_id and entry_id and entry_id in docker_ignore_by_id:
@@ -1498,7 +1369,6 @@ async def update_single_docker_image(
         if dry_run:
             return True, current_value, new_value, major_available
 
-        # Async file write with lock
         async with FILE_WRITE_LOCK:
             async with aiofiles.open(file_path, encoding="utf-8") as f:
                 text = await f.read()
@@ -1534,15 +1404,11 @@ async def update_docker_images(
     if not entries:
         return changed_files, docker_changes, major_updates
 
-    # Process images concurrently using asyncio.gather
     tasks = [update_single_docker_image(session, entry, docker_ignore_by_id, dry_run) for entry in entries]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Process results
     for idx, result in enumerate(results):
         if isinstance(result, Exception):
-            # Exception was already logged in update_single_docker_image with full details
-            # This is just a final note that processing failed for this entry
             print(f"  [ERROR] Skipping {entries[idx]['id']} due to exception (see details above)")
         else:
             changed, old, new, major_available = result
@@ -1566,14 +1432,7 @@ async def update_docker_images(
 
 
 async def write_report(helm_changes: list[dict], docker_changes: list[dict], major_updates: list[dict]) -> None:
-    """
-    Write a human-readable summary to .update-report.txt.
-
-    Args:
-        helm_changes: List of Helm chart version changes
-        docker_changes: List of Docker image version changes
-        major_updates: List of major version updates detected
-    """
+    """Write a human-readable summary to .update-report.txt."""
     if not helm_changes and not docker_changes and not major_updates:
         if REPORT_PATH.exists():
             REPORT_PATH.unlink()
@@ -1617,12 +1476,6 @@ async def write_report(helm_changes: list[dict], docker_changes: list[dict], maj
 
 
 async def async_main() -> int:
-    """
-    Main async function that orchestrates version updates.
-
-    Returns:
-        Exit code (0 for success, 1 for error)
-    """
     start_time = time.time()
 
     if not CONFIG_PATH.exists():
@@ -1634,20 +1487,14 @@ async def async_main() -> int:
     config = await load_yaml(CONFIG_PATH)
     ignore_config = config.get("ignore")
 
-    # Build optimized ignore lookups with pre-compiled regex patterns
     docker_ignore_by_id, helm_ignore_by_name = build_ignore_lookups(ignore_config)
 
-    # Initialize registry-specific semaphores
     global REGISTRY_SEMAPHORES, HELM_SEMAPHORE
 
-    # Initialize Helm chart semaphore for concurrency control
     HELM_SEMAPHORE = asyncio.Semaphore(HELM_CONCURRENCY_LIMIT)
 
-    # Initialize Docker registry semaphores
     REGISTRY_SEMAPHORES = {registry: asyncio.Semaphore(limit) for registry, limit in REGISTRY_LIMITS.items()}
 
-    # Check Docker Hub authentication and adjust limits
-    import os
 
     dockerhub_username = os.environ.get("DOCKERHUB_USERNAME", "").strip()
     dockerhub_token = os.environ.get("DOCKERHUB_TOKEN", "").strip() or os.environ.get("DOCKERHUB_PASSWORD", "").strip()
@@ -1655,7 +1502,6 @@ async def async_main() -> int:
 
     if dockerhub_authenticated:
         print("Docker Hub: Authenticated (200 req/6h rate limit)")
-        # Increase Docker Hub concurrency limit when authenticated
         REGISTRY_LIMITS["dockerhub"] = 5
         REGISTRY_SEMAPHORES["dockerhub"] = asyncio.Semaphore(5)
     else:
@@ -1700,11 +1546,9 @@ async def async_main() -> int:
         changed_files |= helm_changed_files
         changed_files |= docker_changed_files
 
-    # Write report (for CI/Telegram, etc.)
     if not dry_run:
         await write_report(helm_changes, docker_changes, major_updates)
 
-    # Performance summary
     total_duration = time.time() - start_time
     total_helm = (
         len(config.get("argoApps", []))
@@ -1730,12 +1574,6 @@ async def async_main() -> int:
 
 
 def main() -> int:
-    """
-    Entry point that runs the async main function.
-
-    Returns:
-        Exit code (0 for success, 1 for error)
-    """
     return asyncio.run(async_main())
 
 
