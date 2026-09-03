@@ -24,6 +24,7 @@ from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
 
+import aiohttp
 import pytest
 
 
@@ -40,12 +41,15 @@ update_versions = load_update_versions()
 
 
 class FakeResponse:
-    def __init__(self, json_data, headers=None):
+    def __init__(self, json_data=None, headers=None, status=200, raise_exc=None):
         self._json_data = json_data
         self.headers = headers or {}
+        self.status = status
+        self._raise_exc = raise_exc
 
     def raise_for_status(self):
-        pass
+        if self._raise_exc is not None:
+            raise self._raise_exc
 
     async def json(self):
         return self._json_data
@@ -70,6 +74,36 @@ class FakeSession:
         if url not in self._responses:
             raise AssertionError(f"unexpected request to {url}")
         return self._responses[url]
+
+
+class SequencedSession:
+    """Like FakeSession but each URL maps to a *queue* of outcomes, consumed
+    one per get() call - so a URL can fail transiently on the first attempt(s)
+    and then succeed. Queue entries are FakeResponse instances (a
+    FakeResponse with raise_exc set models a transient error)."""
+
+    def __init__(self, sequences: dict[str, list]):
+        self._seq = {url: list(items) for url, items in sequences.items()}
+        self.calls = []
+
+    def get(self, url, headers=None, timeout=None):
+        self.calls.append({"url": url, "headers": headers or {}})
+        queue = self._seq.get(url)
+        if not queue:
+            raise AssertionError(f"unexpected request to {url}")
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    """Never actually sleep between retries - record the backoff delays instead."""
+    slept: list[float] = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(update_versions.asyncio, "sleep", fake_sleep)
+    return slept
 
 
 class TestListGhcrTags:
@@ -147,3 +181,109 @@ class TestListGhcrTags:
 
         token_call = next(c for c in session.calls if c["url"] == token_url)
         assert token_call["headers"]["Authorization"] == expected
+
+
+def transient():
+    """A response whose raise_for_status() raises a retryable error."""
+    return FakeResponse(raise_exc=aiohttp.ClientError("connection reset"))
+
+
+class TestGetJsonWithRetry:
+    """The shared retry/backoff helper behind list_{dockerhub,ghcr,quay}_tags.
+    The retry path had no coverage when it was extracted from the individual
+    functions - only the happy path did."""
+
+    URL = "https://example.test/v2/repo/tags/list"
+
+    @pytest.mark.asyncio
+    async def test_returns_first_success_without_sleeping(self, _no_sleep):
+        session = SequencedSession({self.URL: [FakeResponse({"tags": ["1.0.0"]})]})
+
+        data, headers = await update_versions._get_json_with_retry(session, self.URL, {}, "test")
+
+        assert data == {"tags": ["1.0.0"]}
+        assert _no_sleep == []
+        assert len(session.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_recovers_after_transient_errors(self, _no_sleep):
+        session = SequencedSession({self.URL: [transient(), transient(), FakeResponse({"tags": ["1.0.0"]})]})
+
+        data, _ = await update_versions._get_json_with_retry(session, self.URL, {}, "test")
+
+        assert data == {"tags": ["1.0.0"]}
+        assert len(session.calls) == 3
+        assert _no_sleep == [1, 2]  # exponential backoff: 2**0, 2**1
+
+    @pytest.mark.asyncio
+    async def test_raises_after_exhausting_retries(self, _no_sleep):
+        session = SequencedSession({self.URL: [transient(), transient(), transient()]})
+
+        with pytest.raises(aiohttp.ClientError):
+            await update_versions._get_json_with_retry(session, self.URL, {}, "test")
+
+        assert len(session.calls) == 3  # max_retries, not more
+        assert _no_sleep == [1, 2]  # slept between attempts, not after the last
+
+    @pytest.mark.asyncio
+    async def test_max_retries_is_configurable(self, _no_sleep):
+        session = SequencedSession({self.URL: [transient()] * 5})
+
+        with pytest.raises(aiohttp.ClientError):
+            await update_versions._get_json_with_retry(session, self.URL, {}, "test", max_retries=5)
+
+        assert len(session.calls) == 5
+        assert _no_sleep == [1, 2, 4, 8]
+
+
+class TestListGhcrTagsRetry:
+    @pytest.mark.asyncio
+    async def test_transient_error_on_tags_page_recovers(self, _no_sleep):
+        token_url = "https://ghcr.io/token?service=ghcr.io&scope=repository:owner/repo:pull"
+        tags_url = "https://ghcr.io/v2/owner/repo/tags/list?n=1000"
+        session = SequencedSession(
+            {
+                token_url: [FakeResponse({"token": "t"})],
+                tags_url: [transient(), FakeResponse({"tags": ["1.0.0", "2.0.0"]})],
+            }
+        )
+
+        tags = await update_versions.list_ghcr_tags(session, "owner/repo")
+
+        assert tags == ["1.0.0", "2.0.0"]
+        assert _no_sleep == [1]
+
+
+class TestListGcrTags:
+    """list_gcr_tags keeps its own retry loop (it has a pre-raise_for_status
+    401 check the shared helper doesn't) - so it needs its own coverage."""
+
+    URL = "https://gcr.io/v2/owner/repo/tags/list"
+
+    @pytest.mark.asyncio
+    async def test_401_returns_empty_without_retrying(self, _no_sleep):
+        session = SequencedSession({self.URL: [FakeResponse(status=401)]})
+
+        tags = await update_versions.list_gcr_tags(session, "owner/repo")
+
+        assert tags == []
+        assert len(session.calls) == 1  # no retry on a 401
+        assert _no_sleep == []
+
+    @pytest.mark.asyncio
+    async def test_retries_transient_then_succeeds(self, _no_sleep):
+        session = SequencedSession({self.URL: [transient(), FakeResponse({"tags": ["1.0.0"]})]})
+
+        tags = await update_versions.list_gcr_tags(session, "owner/repo")
+
+        assert tags == ["1.0.0"]
+        assert _no_sleep == [1]
+
+    @pytest.mark.asyncio
+    async def test_gives_up_after_retries_and_returns_empty(self, _no_sleep):
+        session = SequencedSession({self.URL: [transient(), transient(), transient()]})
+
+        tags = await update_versions.list_gcr_tags(session, "owner/repo")
+
+        assert tags == []  # outer except swallows the final raise
+        assert _no_sleep == [1, 2]
