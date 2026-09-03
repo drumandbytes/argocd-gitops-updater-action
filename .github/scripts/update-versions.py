@@ -70,14 +70,7 @@ def normalize_version_string(tag: str) -> str:
         return m.group(1)
 
     # variant tag: keep the leading [0-9.] run
-    tag = tag.lstrip("v")
-    core = ""
-    for ch in tag:
-        if ch.isdigit() or ch == ".":
-            core += ch
-        else:
-            break
-    return core
+    return re.match(r"v?([\d.]*)", tag).group(1)
 
 
 def build_ignore_lookups(ignore_config: dict | None) -> tuple[dict[str, dict], dict[str, dict]]:
@@ -793,23 +786,15 @@ def parse_image(image_str: str) -> tuple[str, str]:
 
 
 def extract_semver_core(tag: str) -> str | None:
-    """
-    Extract a semver-ish core from a tag by taking leading [0-9.] chars.
-    """
-    core = ""
-    for ch in tag:
-        if ch.isdigit() or ch == ".":
-            core += ch
-        else:
-            break
-    return core or None
+    """Leading [0-9.] run of a tag, or None."""
+    return re.match(r"[\d.]*", tag).group() or None
 
 
 def parse_semver_from_tag(tag: str) -> Version | None:
     """Parse a tag to a Version via normalize_version_string(), or None.
 
-        >>> parse_semver_from_tag("v1.24.1-p1")
-        <Version('1.24.1.post1')>
+    >>> parse_semver_from_tag("v1.24.1-p1")
+    <Version('1.24.1.post1')>
     """
     normalized = normalize_version_string(tag)
     if not normalized:
@@ -876,6 +861,23 @@ def is_tag_candidate(tag: str, required_variant: str | None = None) -> bool:
     return True
 
 
+async def _get_json_with_retry(session, url, headers, label, max_retries=3):
+    """GET url, retrying transient errors with exponential backoff. Returns (json, headers)."""
+    for attempt in range(max_retries):
+        try:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                resp.raise_for_status()
+                return await resp.json(), resp.headers
+        except (TimeoutError, aiohttp.ClientError) as e:
+            msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+            if attempt == max_retries - 1:
+                print(f"  [ERROR] {label} failed after {max_retries} attempts: {msg}")
+                raise
+            wait = 2**attempt
+            print(f"  [WARN] {label} failed (attempt {attempt + 1}/{max_retries}), retrying in {wait}s: {msg}")
+            await asyncio.sleep(wait)
+
+
 async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> list[str]:
     """
     List tags from Docker Hub.
@@ -933,38 +935,12 @@ async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> 
     url = f"https://registry-1.docker.io/v2/{api_repo}/tags/list?n=1000"
 
     while url:
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json()
-                    tags.extend(data.get("tags", []))
-
-                    # Check for pagination link in Link header (same
-                    # Docker Registry v2 pagination scheme as ghcr.io) -
-                    # url must be explicitly cleared when there's no next
-                    # page, not just left with its previous value.
-                    link_header = resp.headers.get("Link", "")
-                    next_url = None
-                    if link_header and 'rel="next"' in link_header:
-                        match = re.search(r'<(/v2/[^>]+)>;\s*rel="next"', link_header)
-                        if match:
-                            next_url = f"https://registry-1.docker.io{match.group(1)}"
-                    url = next_url
-                break
-            except (TimeoutError, aiohttp.ClientError) as e:
-                if attempt < max_retries - 1:
-                    wait_time = 2**attempt
-                    error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
-                    print(
-                        f"  [WARN] Docker Hub request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}"
-                    )
-                    await asyncio.sleep(wait_time)
-                else:
-                    error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
-                    print(f"  [ERROR] Docker Hub request failed after {max_retries} attempts: {error_msg}")
-                    raise
+        data, resp_headers = await _get_json_with_retry(session, url, headers, "Docker Hub request")
+        tags.extend(data.get("tags", []))
+        # url must be explicitly cleared when there's no next page (same
+        # Docker Registry v2 Link-header scheme as ghcr.io).
+        match = re.search(r'<(/v2/[^>]+)>;\s*rel="next"', resp_headers.get("Link", ""))
+        url = f"https://registry-1.docker.io{match.group(1)}" if match else None
 
     return tags
 
@@ -1008,46 +984,16 @@ async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> lis
         headers["Authorization"] = f"Bearer {bearer_token}"
 
     all_tags = []
-    url = f"{base_url}?n=1000"  # Request up to 1000 tags per page
+    url = f"{base_url}?n=1000"
 
     try:
         while url:
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        resp.raise_for_status()
-                        data = await resp.json()
-                        tags = data.get("tags", [])
-                        all_tags.extend(tags)
-
-                        # Check for pagination link in Link header. Must
-                        # explicitly set url to None when there's no next
-                        # page - the old `break` here only exited this
-                        # retry loop, not the outer `while url:` loop, so
-                        # url kept its previous (still-truthy) value and the
-                        # same page got re-fetched forever for any repo
-                        # whose tags fit on a single page.
-                        link_header = resp.headers.get("Link", "")
-                        next_url = None
-                        if link_header and 'rel="next"' in link_header:
-                            # Format: </v2/repo/tags/list?n=100&last=tag>; rel="next"
-                            match = re.search(r'<(/v2/[^>]+)>;\s*rel="next"', link_header)
-                            if match:
-                                next_url = f"https://ghcr.io{match.group(1)}"
-                        url = next_url
-                    break
-                except (TimeoutError, aiohttp.ClientError) as e:
-                    if attempt < max_retries - 1:
-                        wait_time = 2**attempt
-                        error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
-                        print(
-                            f"  [WARN] GHCR request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}"
-                        )
-                        await asyncio.sleep(wait_time)
-                    else:
-                        raise
-
+            data, resp_headers = await _get_json_with_retry(session, url, headers, "GHCR request")
+            all_tags.extend(data.get("tags", []))
+            # must set url to None when there's no next page, or the outer
+            # `while url:` loop re-fetches the last page forever.
+            match = re.search(r'<(/v2/[^>]+)>;\s*rel="next"', resp_headers.get("Link", ""))
+            url = f"https://ghcr.io{match.group(1)}" if match else None
         return all_tags
     except Exception as e:
         print(f"  [WARN] Failed to fetch ghcr.io tags for {repository}: {e}")
@@ -1061,35 +1007,13 @@ async def list_quay_tags(session: aiohttp.ClientSession, repository: str) -> lis
 
     try:
         while url:
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        resp.raise_for_status()
-                        data = await resp.json()
-
-                        for tag_data in data.get("tags", []):
-                            name = tag_data.get("name")
-                            if name:
-                                tags.append(name)
-
-                        if data.get("has_additional"):
-                            page = data.get("page", 1) + 1
-                            url = f"https://quay.io/api/v1/repository/{repository}/tag/?limit=100&page={page}"
-                        else:
-                            url = None
-                    break
-                except (TimeoutError, aiohttp.ClientError) as e:
-                    if attempt < max_retries - 1:
-                        wait_time = 2**attempt
-                        error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
-                        print(
-                            f"  [WARN] Quay.io request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}"
-                        )
-                        await asyncio.sleep(wait_time)
-                    else:
-                        raise
-
+            data, _ = await _get_json_with_retry(session, url, None, "Quay.io request")
+            tags.extend(t["name"] for t in data.get("tags", []) if t.get("name"))
+            if data.get("has_additional"):
+                page = data.get("page", 1) + 1
+                url = f"https://quay.io/api/v1/repository/{repository}/tag/?limit=100&page={page}"
+            else:
+                url = None
         return tags
     except Exception as e:
         print(f"  [WARN] Failed to fetch quay.io tags for {repository}: {e}")
@@ -1494,7 +1418,6 @@ async def async_main() -> int:
     HELM_SEMAPHORE = asyncio.Semaphore(HELM_CONCURRENCY_LIMIT)
 
     REGISTRY_SEMAPHORES = {registry: asyncio.Semaphore(limit) for registry, limit in REGISTRY_LIMITS.items()}
-
 
     dockerhub_username = os.environ.get("DOCKERHUB_USERNAME", "").strip()
     dockerhub_token = os.environ.get("DOCKERHUB_TOKEN", "").strip() or os.environ.get("DOCKERHUB_PASSWORD", "").strip()
