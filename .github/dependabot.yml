@@ -10,3 +10,7 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+    # `fix(deps):` so release-please folds each bump into a patch release.
+    commit-message:
+      prefix: "fix"
+      include: "scope"
