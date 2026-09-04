@@ -28,19 +28,19 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      # Consumers pin @v1 and expect it to follow patches/minors. Move it (and
-      # the vN.M convenience tag) onto every new release.
+      # Consumers pin @v2 and expect it to follow patches/minors. Move it (and
+      # the vN.M convenience tag) onto every new release. This job has no
+      # checkout, so retarget the refs through the API. v5 root-component
+      # outputs are bare, not '.--'-prefixed.
       - if: ${{ steps.release.outputs.release_created }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TAG: ${{ steps.release.outputs.tag_name }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.release.outputs.sha }}
           MAJOR: ${{ steps.release.outputs.major }}
           MINOR: ${{ steps.release.outputs.minor }}
         run: |
-          git config user.name "dnb-robot[bot]"
-          git config user.email "4773076+dnb-robot[bot]@users.noreply.github.com"
-          git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}"
           for ALIAS in "v${MAJOR}" "v${MAJOR}.${MINOR}"; do
-            git tag -f "$ALIAS" "$TAG"
-            git push origin "$ALIAS" --force
+            gh api -X PATCH "repos/${REPO}/git/refs/tags/${ALIAS}" -f sha="${SHA}" -F force=true \
+              || gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/${ALIAS}" -f sha="${SHA}"
           done
