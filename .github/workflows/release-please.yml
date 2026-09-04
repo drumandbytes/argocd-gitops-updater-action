@@ -1,5 +1,7 @@
 name: Release Please
 
+# Consumers pin @v2 and expect it to follow patches/minors - move-floating-tags
+# handles that.
 on:
   push:
     branches: [main]
@@ -10,37 +12,7 @@ permissions:
 
 jobs:
   release-please:
-    runs-on: ubuntu-latest
-    steps:
-      # dnb-robot App token, not GITHUB_TOKEN: the release PR merge and the tag
-      # pushes have to get past protecting-main's ruleset, which only bypasses
-      # for this installed App (see drumandbytes/dnb-tf rulesets.tf).
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: app-token
-        with:
-          client-id: ${{ secrets.DNB_ROBOT_CLIENT_ID }}
-          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
-
-      - uses: googleapis/release-please-action@v5
-        id: release
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-
-      # Consumers pin @v2 and expect it to follow patches/minors. Move it (and
-      # the vN.M convenience tag) onto every new release. This job has no
-      # checkout, so retarget the refs through the API. v5 root-component
-      # outputs are bare, not '.--'-prefixed.
-      - if: ${{ steps.release.outputs.release_created }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ steps.release.outputs.sha }}
-          MAJOR: ${{ steps.release.outputs.major }}
-          MINOR: ${{ steps.release.outputs.minor }}
-        run: |
-          for ALIAS in "v${MAJOR}" "v${MAJOR}.${MINOR}"; do
-            gh api -X PATCH "repos/${REPO}/git/refs/tags/${ALIAS}" -f sha="${SHA}" -F force=true \
-              || gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/${ALIAS}" -f sha="${SHA}"
-          done
+    uses: drumandbytes/reusable-actions/.github/workflows/release-please.yml@v1
+    with:
+      move-floating-tags: true
+    secrets: inherit
