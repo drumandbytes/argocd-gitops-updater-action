@@ -30,12 +30,12 @@ jobs:
 
       # Consumers pin @v1 and expect it to follow patches/minors. Move it (and
       # the vN.M convenience tag) onto every new release.
-      - if: ${{ steps.release.outputs['.--release_created'] }}
+      - if: ${{ steps.release.outputs.release_created }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TAG: ${{ steps.release.outputs['.--tag_name'] }}
-          MAJOR: ${{ steps.release.outputs['.--major'] }}
-          MINOR: ${{ steps.release.outputs['.--minor'] }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+          MAJOR: ${{ steps.release.outputs.major }}
+          MINOR: ${{ steps.release.outputs.minor }}
         run: |
           git config user.name "dnb-robot[bot]"
           git config user.email "4773076+dnb-robot[bot]@users.noreply.github.com"
