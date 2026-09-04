@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.3](https://github.com/drumandbytes/argocd-gitops-updater-action/compare/v2.2.2...v2.2.3) (2026-09-04)
+
+
+### Bug Fixes
+
+* **ci:** use v5 bare output names for the tag-move step ([#32](https://github.com/drumandbytes/argocd-gitops-updater-action/issues/32)) ([225dbe3](https://github.com/drumandbytes/argocd-gitops-updater-action/commit/225dbe30edb6eb608892bb25a85f671e697ae284))
+* **deps:** bump the actions group with 2 updates ([#31](https://github.com/drumandbytes/argocd-gitops-updater-action/issues/31)) ([8a6dda0](https://github.com/drumandbytes/argocd-gitops-updater-action/commit/8a6dda0ac0660494fb77fe28ef2891a7d6108808))
+
 ## [2.2.2] - 2026-09-03
 
 ## [2.2.1] - 2026-08-30
