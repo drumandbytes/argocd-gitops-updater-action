@@ -98,24 +98,28 @@ ruff format .github/scripts/
 6. Push to your fork: `git push origin feature/my-feature`
 7. Open a Pull Request
 
-### Commit Message Format
+### Commits and releases
 
-Use conventional commit format:
+Releases are automated with [release-please](https://github.com/googleapis/release-please).
+It reads the commit history on `main`, keeps a rolling **release PR** with the next
+version + changelog, and cuts the release (tag, GitHub Release, `CHANGELOG.md`) when
+that PR is merged. The floating `v2` / `v2.N` tags are moved automatically.
 
-- `feat:` - New features
-- `fix:` - Bug fixes
-- `docs:` - Documentation changes
-- `refactor:` - Code refactoring
-- `test:` - Adding or updating tests
-- `chore:` - Maintenance tasks
-- `perf:` - Performance improvements
+For this to work, **squash-merge every PR** with a
+[Conventional Commits](https://www.conventionalcommits.org/) title:
 
-Examples:
-```
-feat: add support for Azure Container Registry
-fix: handle timeout errors in Docker Hub API
-docs: update README with new configuration options
-```
+| Prefix | Effect | Example |
+| --- | --- | --- |
+| `feat:` | minor bump | `feat: add support for Azure Container Registry` |
+| `fix:` / `perf:` | patch bump | `fix: handle timeout errors in the Docker Hub API` |
+| `feat!:` or `BREAKING CHANGE:` in body | major bump | `feat!: require ArgoCD 2.x` |
+| `chore:` `docs:` `ci:` `test:` `refactor:` `build:` | no release | `docs: update the README` |
+
+Dependabot is configured to prefix its PRs with `fix(deps):`, so dependency bumps
+become patch releases on their own.
+
+The old `release:major` / `release:minor` / `release:patch` labels are gone.
+Don't hand-edit `CHANGELOG.md`, `version.txt`, or tags — release-please owns them.
 
 ### Pull Request Guidelines
 
