@@ -4,10 +4,15 @@ name: Security
 # workflow's conclusion, so keeping the scan in CI meant a vulnerability in
 # one package blocked merging a Dependabot PR that fixed a different one —
 # the gate held its own fixes hostage. Findings still fail this workflow.
+#
+# No push:branches:[main] leg: pull_request already scanned this before
+# merge, so a post-merge rerun scanned nothing new. No npm/pip manifest here
+# to path-filter on (only dependency is github-actions), so every PR still
+# gets scanned; the weekly run catches advisories against what's on main.
 on:
-  push:
-    branches: [main]
   pull_request:
+  schedule:
+    - cron: '0 6 * * 1'
   workflow_dispatch:
 
 concurrency:
