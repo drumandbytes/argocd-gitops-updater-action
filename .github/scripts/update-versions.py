@@ -321,10 +321,7 @@ def replace_yaml_new_tag(text: str, image_name: str, old: str, new: str) -> tupl
 # ----------------- HELM STUFF -----------------
 
 
-async def get_latest_helm_chart_version(session: aiohttp.ClientSession, repo_url: str, chart_name: str) -> str | None:
-    """Get the latest Helm chart version from a repository."""
-    index_url = repo_url.rstrip("/") + "/index.yaml"
-
+async def _fetch_helm_index(session: aiohttp.ClientSession, index_url: str) -> dict:
     async with HELM_SEMAPHORE:
         max_retries = 3
         for attempt in range(max_retries):
@@ -346,7 +343,21 @@ async def get_latest_helm_chart_version(session: aiohttp.ClientSession, repo_url
                     print(f"  [ERROR] Helm chart request failed after {max_retries} attempts: {error_msg}")
                     raise
 
-    index = yaml.safe_load(content)
+    return yaml.safe_load(content)
+
+
+async def get_latest_helm_chart_version(
+    session: aiohttp.ClientSession,
+    repo_url: str,
+    chart_name: str,
+    index_tasks: dict[str, asyncio.Task[dict]],
+) -> str | None:
+    """Get the latest Helm chart version from a repository."""
+    index_url = repo_url.rstrip("/") + "/index.yaml"
+    if index_url not in index_tasks:
+        index_tasks[index_url] = asyncio.create_task(_fetch_helm_index(session, index_url))
+
+    index = await index_tasks[index_url]
     entries = index.get("entries", {}).get(chart_name, [])
     versions = [e["version"] for e in entries if "version" in e]
     return latest_semver(versions)
@@ -581,7 +592,11 @@ async def update_chart_yaml(
 
 
 async def process_argo_app(
-    session: aiohttp.ClientSession, app: dict, helm_ignore_by_name: dict[str, dict], dry_run: bool
+    session: aiohttp.ClientSession,
+    app: dict,
+    helm_ignore_by_name: dict[str, dict],
+    dry_run: bool,
+    index_tasks: dict[str, asyncio.Task[dict]],
 ) -> tuple[set[str], list[dict], str | None]:
     """Process a single Argo CD app. Returns (changed_files, helm_changes, errors)."""
     changed_files = set()
@@ -608,7 +623,7 @@ async def process_argo_app(
             print(f"  [SKIP] {reason}")
             return changed_files, helm_changes, None
 
-        latest = await get_latest_helm_chart_version(session, repo_url, name)
+        latest = await get_latest_helm_chart_version(session, repo_url, name, index_tasks)
         if not latest:
             print(f"  [WARN] No valid versions found in {repo_url} for {name}")
             return changed_files, helm_changes, None
@@ -635,7 +650,11 @@ async def process_argo_app(
 
 
 async def process_kustomize_chart(
-    session: aiohttp.ClientSession, entry: dict, helm_ignore_by_name: dict[str, dict], dry_run: bool
+    session: aiohttp.ClientSession,
+    entry: dict,
+    helm_ignore_by_name: dict[str, dict],
+    dry_run: bool,
+    index_tasks: dict[str, asyncio.Task[dict]],
 ) -> tuple[set[str], list[dict], str | None]:
     """Process a single Kustomize Helm chart. Returns (changed_files, helm_changes, errors)."""
     changed_files = set()
@@ -653,7 +672,7 @@ async def process_kustomize_chart(
             print(f"  [SKIP] {reason}")
             return changed_files, helm_changes, None
 
-        latest = await get_latest_helm_chart_version(session, repo_url, name)
+        latest = await get_latest_helm_chart_version(session, repo_url, name, index_tasks)
         if not latest:
             print(f"  [WARN] No valid versions found in {repo_url} for {name}")
             return changed_files, helm_changes, None
@@ -682,7 +701,11 @@ async def process_kustomize_chart(
 
 
 async def process_chart_dependency(
-    session: aiohttp.ClientSession, entry: dict, helm_ignore_by_name: dict[str, dict], dry_run: bool
+    session: aiohttp.ClientSession,
+    entry: dict,
+    helm_ignore_by_name: dict[str, dict],
+    dry_run: bool,
+    index_tasks: dict[str, asyncio.Task[dict]],
 ) -> tuple[set[str], list[dict], str | None]:
     """Process a single Chart.yaml dependency. Returns (changed_files, helm_changes, errors)."""
     changed_files = set()
@@ -699,7 +722,7 @@ async def process_chart_dependency(
             print(f"  [SKIP] {reason}")
             return changed_files, helm_changes, None
 
-        latest = await get_latest_helm_chart_version(session, repo_url, name)
+        latest = await get_latest_helm_chart_version(session, repo_url, name, index_tasks)
         if not latest:
             print(f"  [WARN] No valid versions found in {repo_url} for {name}")
             return changed_files, helm_changes, None
@@ -746,14 +769,15 @@ async def update_helm_charts(
     if not all_tasks:
         return changed_files, helm_changes
 
+    index_tasks = {}
     tasks = []
     for task_type, item in all_tasks:
         if task_type == "argo":
-            task = process_argo_app(session, item, helm_ignore_by_name, dry_run)
+            task = process_argo_app(session, item, helm_ignore_by_name, dry_run, index_tasks)
         elif task_type == "kustomize":
-            task = process_kustomize_chart(session, item, helm_ignore_by_name, dry_run)
+            task = process_kustomize_chart(session, item, helm_ignore_by_name, dry_run, index_tasks)
         else:  # chartDep
-            task = process_chart_dependency(session, item, helm_ignore_by_name, dry_run)
+            task = process_chart_dependency(session, item, helm_ignore_by_name, dry_run, index_tasks)
         tasks.append(task)
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
