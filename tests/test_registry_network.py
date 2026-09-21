@@ -19,6 +19,7 @@ re-fetched the same page forever, and a deprecated aiohttp.BasicAuth
 usage) with nothing in CI that would have caught either one.
 """
 
+import asyncio
 import base64
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
@@ -52,6 +53,9 @@ class FakeResponse:
             raise self._raise_exc
 
     async def json(self):
+        return self._json_data
+
+    async def text(self):
         return self._json_data
 
     async def __aenter__(self):
@@ -186,6 +190,78 @@ class TestListGhcrTags:
 def transient():
     """A response whose raise_for_status() raises a retryable error."""
     return FakeResponse(raise_exc=aiohttp.ClientError("connection reset"))
+
+
+class TestHelmIndexCache:
+    URL = "https://charts.example.test/index.yaml"
+    INDEX = "entries:\n  argo-chart:\n    - version: 2.0.0\n  kustomize-chart:\n    - version: 3.0.0\n  dependency-chart:\n    - version: 4.0.0\n"
+
+    @pytest.fixture(autouse=True)
+    def _helm_semaphore(self):
+        update_versions.HELM_SEMAPHORE = asyncio.Semaphore(update_versions.HELM_CONCURRENCY_LIMIT)
+
+    @staticmethod
+    async def _unchanged(*args, **kwargs):
+        return False, None, None
+
+    @pytest.fixture
+    def config(self, tmp_path):
+        app_file = tmp_path / "application.yaml"
+        app_file.write_text(
+            "spec:\n  source:\n    chart: argo-chart\n    targetRevision: 1.0.0\n",
+            encoding="utf-8",
+        )
+        return {
+            "argoApps": [
+                {
+                    "name": "argo-chart",
+                    "repoUrl": "https://charts.example.test/",
+                    "file": str(app_file),
+                }
+            ],
+            "kustomizeHelmCharts": [{"name": "kustomize-chart", "repoUrl": "https://charts.example.test", "files": []}],
+            "chartDependencies": [
+                {"name": "dependency-chart", "repoUrl": "https://charts.example.test///", "files": []}
+            ],
+        }
+
+    @pytest.mark.asyncio
+    async def test_processors_share_one_parsed_index(self, monkeypatch, config):
+        monkeypatch.setattr(update_versions, "update_argo_app_chart", self._unchanged)
+        session = FakeSession({self.URL: FakeResponse(self.INDEX)})
+
+        await update_versions.update_helm_charts(session, config, {}, dry_run=True)
+
+        assert [call["url"] for call in session.calls] == [self.URL]
+
+    @pytest.mark.asyncio
+    async def test_processors_share_retry_count(self, monkeypatch, config, _no_sleep):
+        monkeypatch.setattr(update_versions, "update_argo_app_chart", self._unchanged)
+        session = SequencedSession({self.URL: [transient(), FakeResponse(self.INDEX)]})
+
+        await update_versions.update_helm_charts(session, config, {}, dry_run=True)
+
+        assert len(session.calls) == 2
+        assert _no_sleep == [1]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_callers_share_cached_failure(self, _no_sleep):
+        session = SequencedSession({self.URL: [transient(), transient(), transient()]})
+        index_tasks = {}
+
+        results = await asyncio.gather(
+            update_versions.get_latest_helm_chart_version(
+                session, "https://charts.example.test", "argo-chart", index_tasks
+            ),
+            update_versions.get_latest_helm_chart_version(
+                session, "https://charts.example.test/", "dependency-chart", index_tasks
+            ),
+            return_exceptions=True,
+        )
+
+        assert all(isinstance(result, aiohttp.ClientError) for result in results)
+        assert len(session.calls) == 3
+        assert _no_sleep == [1, 2]
 
 
 class TestGetJsonWithRetry:
