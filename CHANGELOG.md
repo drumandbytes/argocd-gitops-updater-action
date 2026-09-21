@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.6](https://github.com/drumandbytes/argocd-gitops-updater-action/compare/v2.2.5...v2.2.6) (2026-09-21)
+
+
+### Performance Improvements
+
+* **updater:** cache Helm index requests by repo URL ([#46](https://github.com/drumandbytes/argocd-gitops-updater-action/issues/46)) ([449a7b8](https://github.com/drumandbytes/argocd-gitops-updater-action/commit/449a7b8e3e7ff141b58f0bd935ef6541c94727de))
+
 ## [2.2.5](https://github.com/drumandbytes/argocd-gitops-updater-action/compare/v2.2.4...v2.2.5) (2026-09-20)
 
 
