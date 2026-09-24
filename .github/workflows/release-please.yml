@@ -1,7 +1,5 @@
 name: Release Please
 
-# Consumers pin @v2 and expect it to follow patches/minors - move-floating-tags
-# handles that.
 on:
   push:
     branches: [main]
@@ -15,8 +13,6 @@ jobs:
     uses: drumandbytes/reusable-actions/.github/workflows/release-please.yml@v1
     with:
       move-floating-tags: true
-    # Only the two secrets the called workflow uses, rather than `inherit`
-    # handing it every repo and org secret.
     secrets:
       DNB_ROBOT_CLIENT_ID: ${{ secrets.DNB_ROBOT_CLIENT_ID }}
       AUTOMATION_APP_PRIVATE_KEY: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
