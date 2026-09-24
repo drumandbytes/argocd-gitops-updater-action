@@ -1,14 +1,6 @@
 name: Security
 
-# Split out of the CI workflow deliberately. Auto-merge gates on the CI
-# workflow's conclusion, so keeping the scan in CI meant a vulnerability in
-# one package blocked merging a Dependabot PR that fixed a different one —
-# the gate held its own fixes hostage. Findings still fail this workflow.
-#
-# No push:branches:[main] leg: pull_request already scanned this before
-# merge, so a post-merge rerun scanned nothing new. No npm/pip manifest here
-# to path-filter on (only dependency is github-actions), so every PR still
-# gets scanned; the weekly run catches advisories against what's on main.
+# Separate from CI so a finding can't block auto-merge of an unrelated Dependabot fix.
 on:
   pull_request:
   schedule:
@@ -19,7 +11,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Read-only token; no job here writes to the repo or reads other scopes.
 permissions:
   contents: read
 
