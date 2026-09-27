@@ -12,10 +12,7 @@ import yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
-# Round-trip mode (the ruamel.yaml default) preserves comments, key order,
-# and blank lines on anything not explicitly modified - this is only used
-# for .update-config.yaml itself (the file this script rewrites), not the
-# Application/kustomization/Chart.yaml files it only ever reads.
+# Round-trip mode keeps comments/order on .update-config.yaml, the only file we rewrite.
 _ROUNDTRIP_YAML = YAML()
 _ROUNDTRIP_YAML.indent(mapping=2, sequence=4, offset=2)
 _ROUNDTRIP_YAML.width = 4096  # don't wrap long values (chart repo URLs, etc.)
@@ -80,10 +77,7 @@ async def discover_argo_apps(root: Path) -> list[dict]:
     """
     yaml_files = list(root.rglob("*.yaml"))
 
-    # Process files concurrently. return_exceptions=True so one malformed
-    # manifest can't crash discovery for every other file in the repo -
-    # process_argo_app_file already turns expected bad-input shapes into
-    # None, but this is the backstop for anything it doesn't anticipate.
+    # return_exceptions: one malformed manifest mustn't sink discovery for the rest
     tasks = [process_argo_app_file(yaml_file, root) for yaml_file in yaml_files]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -104,11 +98,7 @@ def _find_helm_source(spec: dict) -> dict | None:
     never both, per the Argo CD API.
     """
     if not isinstance(spec, dict):
-        # A manifest with a present-but-null `spec:` parses to None here,
-        # not a missing key - data["spec"] doesn't raise KeyError for that,
-        # so this can't rely on the caller's except (KeyError, TypeError)
-        # alone. Guarding here stops the AttributeError from spec.get(...)
-        # at its source instead.
+        # present-but-null `spec:` is None, not a KeyError; guard before spec.get()
         return None
     candidates = []
     single = spec.get("source")
@@ -141,8 +131,7 @@ async def process_argo_app_file(yaml_file: Path, root: Path) -> dict | None:
         chart = source["chart"]
         repo_url = source["repoURL"]
 
-        # Only include Helm chart repos (URLs starting with http/https)
-        # Skip git repositories (ending with .git)
+        # Helm repos only: http(s), not .git
         if not repo_url.startswith("http"):
             return None
         if repo_url.endswith(".git"):
@@ -258,9 +247,7 @@ def parse_image(image_str: str) -> tuple[str, str, str]:
         ghcr.io/owner/repo:v1.0 -> ("ghcr.io", "owner/repo", "v1.0")
         gcr.io/project/image:tag -> ("gcr.io", "project/image", "tag")
     """
-    # Split off the tag. A real tag never contains "/" - if the text after
-    # the last colon does, that colon is a registry:port separator (e.g.
-    # "localhost:5000/myimage" with no tag at all), not a tag separator.
+    # a real tag never contains "/"; if the last colon is followed by one, it's registry:port
     if ":" in image_str:
         image_part, maybe_tag = image_str.rsplit(":", 1)
         if "/" in maybe_tag:
@@ -465,10 +452,7 @@ def merge_configs(existing: dict, discovered: dict) -> dict:
     ignored_count = dict.fromkeys(_SECTION_KEY_FNS, 0)
 
     for section, key_fn in _SECTION_KEY_FNS.items():
-        # Deliberately `is None`, not truthiness - an existing section that's
-        # merely empty (`dockerImages: []`, possibly with its own trailing
-        # comment) is a real node in the document and must not be replaced
-        # wholesale just because len() == 0.
+        # `is None`, not falsy: an empty `dockerImages: []` is a real node with its own comments
         existing_items = existing.get(section)
         if existing_items is None:
             existing_items = []
@@ -506,7 +490,6 @@ def merge_configs(existing: dict, discovered: dict) -> dict:
 
 async def async_main() -> int:
     root = Path.cwd()
-    # honour action.yml's config-path input; was previously hard-coded
     config_path = root / os.environ.get("CONFIG_PATH", ".update-config.yaml")
 
     print("Auto-discovering resources in the repository...")
@@ -524,14 +507,8 @@ async def async_main() -> int:
         print("Creating new configuration...")
         final_config = discovered
 
-    # Write the config. Uses ruamel.yaml's round-trip mode, not plain
-    # PyYAML - a plain yaml.safe_load/yaml.dump round-trip has no concept
-    # of comments at all, so every comment in the existing file (including
-    # ones documenting non-obvious schema quirks - the exact kind of thing
-    # this script's own history has needed) would be silently stripped on
-    # every auto-discover run. merge_configs() only ever appends new items
-    # to existing lists in place rather than rebuilding the structure from
-    # scratch, which is what makes this actually work end to end.
+    # ruamel round-trip, not PyYAML, so the file's comments survive; merge_configs
+    # only appends in place, which is what keeps them.
     if "--dry-run" in sys.argv:
         print(f"[DRY RUN] Would write configuration to {config_path}, skipping actual write.")
     else:

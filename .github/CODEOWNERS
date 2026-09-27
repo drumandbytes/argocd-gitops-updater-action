@@ -1,7 +1,3 @@
-# CODEOWNERS - defines who must review changes to specific files
-# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
-
-# Default owner for everything in the repo
 * @justmaris
 
 # Action core
