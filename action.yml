@@ -171,7 +171,6 @@ runs:
       env:
         CONFIG_PATH: ${{ inputs.config-path }}
       run: |
-        # Check for both new and modified files using git status
         if git status --porcelain "$CONFIG_PATH" | grep -q .; then
           echo "changes=true" >> $GITHUB_OUTPUT
           echo "Discovery changes detected"
@@ -243,7 +242,6 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        # Exclude report file from diff
         if git diff --quiet -- . ':(exclude).update-report.txt'; then
           echo "changes=false" >> $GITHUB_OUTPUT
           echo "No changes detected"
@@ -273,9 +271,8 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        # Clean up temporary report file
         rm -f .update-report.txt
-        # Also clean up any files created by pip install shell redirection bug (fixed but may exist from previous runs)
+        # stray files from an old pip redirection bug
         rm -f =*
 
     - name: Create Pull Request
@@ -314,7 +311,6 @@ runs:
       run: |
         set -euo pipefail
 
-        # Escape HTML entities
         PR_TITLE_ESCAPED=$(python3 - << 'PY'
         import html, os
         print(html.escape(os.environ.get("PR_TITLE", "")))

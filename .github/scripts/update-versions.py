@@ -12,15 +12,12 @@ import aiohttp
 import yaml
 from packaging.version import InvalidVersion, Version
 
-# action.yml injects CONFIG_PATH from the config-path input; without this the
-# path was hard-coded and every consumer got forced onto .update-config.yaml.
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", ".update-config.yaml"))
 REPORT_PATH = Path(".update-report.txt")
 
 FILE_WRITE_LOCK = asyncio.Lock()
 
-# Concurrent Helm requests still hammer DNS/network even though Helm and Docker
-# phases run sequentially. Semaphores are created in async_main().
+# Helm and Docker phases run sequentially but concurrent Helm requests still hammer DNS.
 HELM_CONCURRENCY_LIMIT = 5
 HELM_SEMAPHORE: asyncio.Semaphore | None = None
 
@@ -28,8 +25,8 @@ HELM_SEMAPHORE: asyncio.Semaphore | None = None
 REGISTRY_LIMITS = {
     "dockerhub": 3,  # Docker Hub is most restrictive (100 req/6h anonymous)
     "ghcr.io": 10,  # GitHub has generous limits (5000 req/h with token)
-    "quay.io": 5,  # Quay is moderate
-    "gcr.io": 5,  # GCR is lenient
+    "quay.io": 5,
+    "gcr.io": 5,
 }
 DEFAULT_REGISTRY_LIMIT = 5
 REGISTRY_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
@@ -262,7 +259,6 @@ def replace_yaml_scalar(text: str, key: str, old: str, new: str) -> tuple[str, i
     pattern = rf'^(\s*{re.escape(key)}\s*:\s*)(["\']?){re.escape(old)}(["\']?)(.*)$'
 
     def replacer(match):
-        # Preserve the quotes that were around the old value
         prefix = match.group(1)
         open_quote = match.group(2)
         close_quote = match.group(3)
@@ -442,11 +438,8 @@ async def update_argo_app_chart(
     async with FILE_WRITE_LOCK:
         async with aiofiles.open(file_path, encoding="utf-8") as f:
             text = await f.read()
-        # Anchored to this specific source's chart name, not a blind
-        # first-match - a multi-source Application's companion (non-Helm)
-        # source can have its own targetRevision, and if that value
-        # happened to equal the chart's current version, an unscoped
-        # replace would silently repoint the wrong source.
+        # anchored to this source's chart: a multi-source app's companion source may
+        # share the same targetRevision
         new_text, count = replace_yaml_scalar_anchored(
             text, "chart", chart_name, "targetRevision", current, latest_version
         )
@@ -509,10 +502,7 @@ async def update_kustomize_helm_chart(
     async with FILE_WRITE_LOCK:
         async with aiofiles.open(file_path, encoding="utf-8") as f:
             text = await f.read()
-        # Anchored to this entry's own name - a plain "version" match would
-        # hit the first "version: <old>" line in the file regardless of
-        # which chart/dependency it belongs to, mis-bumping a different
-        # entry if two currently share the same version string.
+        # anchored to this entry's name: two deps can share a version string
         new_text, count = replace_yaml_scalar_anchored(
             text, "name", chart_name, "version", target_current, latest_version, list_item=True
         )
@@ -575,10 +565,7 @@ async def update_chart_yaml(
     async with FILE_WRITE_LOCK:
         async with aiofiles.open(file_path, encoding="utf-8") as f:
             text = await f.read()
-        # Anchored to this entry's own name - a plain "version" match would
-        # hit the first "version: <old>" line in the file regardless of
-        # which chart/dependency it belongs to, mis-bumping a different
-        # entry if two currently share the same version string.
+        # anchored to this entry's name: two deps can share a version string
         new_text, count = replace_yaml_scalar_anchored(
             text, "name", chart_name, "version", target_current, latest_version, list_item=True
         )
@@ -924,9 +911,7 @@ async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> 
     environment variables for the higher authenticated rate limit.
     """
 
-    # Official single-name images (e.g. "nginx", "redis") live under the
-    # "library/" namespace on the actual registry, even though Docker Hub's
-    # UI and the old hub API accepted the bare name.
+    # official single-name images live under library/ on the registry
     if "/" not in api_repo:
         api_repo = f"library/{api_repo}"
 
@@ -934,10 +919,7 @@ async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> 
     dockerhub_token = os.environ.get("DOCKERHUB_TOKEN") or os.environ.get("DOCKERHUB_PASSWORD")
 
     token_url = f"https://auth.docker.io/token?service=registry.docker.io&scope=repository:{api_repo}:pull"
-    # aiohttp.BasicAuth + the auth= kwarg are both deprecated, removed in
-    # aiohttp 4.0 - aiohttp.encode_basic_auth() is the library's own named
-    # replacement (confirmed against aiohttp's current source, not just
-    # the deprecation message).
+    # BasicAuth/auth= are deprecated (gone in aiohttp 4.0); encode_basic_auth is the replacement
     auth_headers = {}
     if dockerhub_username and dockerhub_token:
         auth_headers["Authorization"] = aiohttp.encode_basic_auth(dockerhub_username, dockerhub_token)
@@ -961,8 +943,7 @@ async def list_dockerhub_tags(session: aiohttp.ClientSession, api_repo: str) -> 
     while url:
         data, resp_headers = await _get_json_with_retry(session, url, headers, "Docker Hub request")
         tags.extend(data.get("tags", []))
-        # url must be explicitly cleared when there's no next page (same
-        # Docker Registry v2 Link-header scheme as ghcr.io).
+        # clear url when there's no next page (same Link-header scheme as ghcr.io)
         match = re.search(r'<(/v2/[^>]+)>;\s*rel="next"', resp_headers.get("Link", ""))
         url = f"https://registry-1.docker.io{match.group(1)}" if match else None
 
@@ -1014,8 +995,7 @@ async def list_ghcr_tags(session: aiohttp.ClientSession, repository: str) -> lis
         while url:
             data, resp_headers = await _get_json_with_retry(session, url, headers, "GHCR request")
             all_tags.extend(data.get("tags", []))
-            # must set url to None when there's no next page, or the outer
-            # `while url:` loop re-fetches the last page forever.
+            # clear url on the last page or `while url:` refetches it forever
             match = re.search(r'<(/v2/[^>]+)>;\s*rel="next"', resp_headers.get("Link", ""))
             url = f"https://ghcr.io{match.group(1)}" if match else None
         return all_tags
@@ -1099,7 +1079,6 @@ async def list_registry_tags(session: aiohttp.ClientSession, registry: str, repo
     elif registry == "gcr.io":
         return await list_gcr_tags(session, repository)
     else:
-        # Try generic Docker Registry V2 API
         print(f"  [INFO] Trying generic Docker Registry V2 API for {registry}")
         url = f"https://{registry}/v2/{repository}/tags/list"
         try:
@@ -1133,7 +1112,6 @@ async def find_best_tags_for_same_major(
         print(f"  [WARN] Cannot parse current tag '{current_tag}' as semver, skipping semver-based updates")
         return None, None, None, None
 
-    # Extract variant from current tag to preserve it
     current_variant = extract_variant_pattern(current_tag)
     if current_variant:
         print(f"  [INFO] Detected image variant: {current_variant} (will only consider {current_variant} tags)")
@@ -1176,8 +1154,7 @@ async def find_best_tags_for_same_major(
         if v.major == current_ver.major:
             same_major.append((v, t))
 
-    # Only fall back to non-variant tags if NO tags found with variant
-    # (indicates variant detection might be wrong)
+    # non-variant tags only if nothing matched the variant (detection may be wrong)
     if not all_versions and current_variant:
         print(f"  [INFO] No tags found with variant '{current_variant}', retrying without variant filter...")
         all_versions = []
@@ -1228,22 +1205,19 @@ async def update_single_docker_image(
             cur = cur[key]
         current_value = str(cur)
 
-        # Detect if yamlPath targets a newTag field (kustomize overlay) or an image field (deployment spec)
+        # newTag (kustomize overlay, plain tag) vs image (full reference)
         is_new_tag_field = yaml_path[-1] == "newTag" if yaml_path else False
 
         if is_new_tag_field:
-            # Value is a plain tag string (e.g., "6.14.0-alpine3.23")
             current_tag = current_value
             image_name = None
             yaml_key = "newTag"
-            # Extract image name from sibling field for context-aware replacement
-            # yamlPath like ["images", 0, "newTag"] → parent is data["images"][0]
+            # image name from the sibling "name" for context-aware replacement
             parent = data
             for key in yaml_path[:-1]:
                 parent = parent[key]
             image_context_name = parent.get("name", "")
         else:
-            # Value is a full image reference (e.g., "ghost:6.14.0-alpine3.23")
             image_name, current_tag = parse_image(current_value)
             yaml_key = "image"
 
@@ -1258,13 +1232,8 @@ async def update_single_docker_image(
             print(f"  [SKIP] {reason}")
             return False, None, None, None
 
-        # Get registry-specific semaphore for rate limiting. setdefault, not
-        # get - a registry outside the 4 explicitly configured ones used to
-        # fall through to no rate limiting at all (REGISTRY_SEMAPHORES.get
-        # returning None was treated as "don't limit"), risking real bans
-        # against a private/self-hosted registry. This gives every other
-        # registry its own persistent semaphore at DEFAULT_REGISTRY_LIMIT
-        # instead, the constant this was already defined for but never used.
+        # setdefault, not get: unknown registries get their own DEFAULT_REGISTRY_LIMIT
+        # semaphore instead of no limit at all
         semaphore = REGISTRY_SEMAPHORES.setdefault(registry, asyncio.Semaphore(DEFAULT_REGISTRY_LIMIT))
 
         best_same_tag, best_same_ver, best_any_tag, best_any_ver = await find_best_tags_for_same_major(
@@ -1468,16 +1437,13 @@ async def async_main() -> int:
 
     changed_files = set()
 
-    # Create session with connection limits to avoid overwhelming network
     connector = aiohttp.TCPConnector(
-        limit=30,  # Total concurrent connections
-        limit_per_host=10,  # Max concurrent connections per host
-        ttl_dns_cache=300,  # Cache DNS for 5 minutes
+        limit=30,
+        limit_per_host=10,
+        ttl_dns_cache=300,
     )
     async with aiohttp.ClientSession(connector=connector) as session:
-        # Run Helm and Docker updates sequentially to reduce network stress
-        # Parallel execution caused too many timeouts requiring retries that
-        # negated the performance benefit. Sequential is more reliable.
+        # sequential: running Helm and Docker in parallel caused enough timeouts to lose the gain
         helm_start = time.time()
         helm_changed_files, helm_changes = await update_helm_charts(
             session, config, helm_ignore_by_name, dry_run=dry_run
