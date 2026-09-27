@@ -512,3 +512,7 @@ MIT License - see [LICENSE](LICENSE) file for details
 ## ⭐ Show Your Support
 
 If this action helps you, please consider giving it a star! ⭐
+
+## How it was made
+
+Built with the help of an AI coding assistant (Claude). I review and test what gets published.
