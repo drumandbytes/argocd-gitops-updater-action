@@ -4,7 +4,7 @@
 [![CI](https://github.com/drumandbytes/argocd-gitops-updater-action/actions/workflows/ci.yml/badge.svg)](https://github.com/drumandbytes/argocd-gitops-updater-action/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-[More Drumandbytes projects](https://drumandbytes.com/projects/)
+[More Drumandbytes projects](https://drumandbytes.com/projects/?ref=argocd-gitops-updater-action-readme)
 
 > GitHub Action for automated Helm chart and Docker image version updates. GitOps-friendly with ArgoCD/Kustomize support, auto-discovery, semantic versioning, and notifications (Slack/Teams/Discord/Telegram)
 
