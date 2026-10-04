@@ -246,7 +246,9 @@ def parse_image(image_str: str) -> tuple[str, str, str]:
         cloudflare/cloudflared:2025.11.1 -> ("dockerhub", "cloudflare/cloudflared", "2025.11.1")
         ghcr.io/owner/repo:v1.0 -> ("ghcr.io", "owner/repo", "v1.0")
         gcr.io/project/image:tag -> ("gcr.io", "project/image", "tag")
+        ghcr.io/owner/repo:sha-1b6f46d@sha256:abc -> ("ghcr.io", "owner/repo", "sha-1b6f46d")
     """
+    image_str = image_str.split("@", 1)[0]
     # a real tag never contains "/"; if the last colon is followed by one, it's registry:port
     if ":" in image_str:
         image_part, maybe_tag = image_str.rsplit(":", 1)

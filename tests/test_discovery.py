@@ -49,6 +49,15 @@ class TestParseImage:
         assert repo == "project/image"
         assert tag == "latest"
 
+    def test_digest_pinned(self):
+        """Digest suffix is dropped, tag kept."""
+        registry, repo, tag = discover_resources.parse_image(
+            "ghcr.io/owner/repo:sha-1b6f46d@sha256:364341e8a435c177e3117370810a37755d85416dd6194f9cbb7c6cc1fc436015"
+        )
+        assert registry == "ghcr.io"
+        assert repo == "owner/repo"
+        assert tag == "sha-1b6f46d"
+
     def test_quay(self):
         """Test Quay.io."""
         registry, repo, tag = discover_resources.parse_image("quay.io/prometheus/prometheus:v2.48.0")
