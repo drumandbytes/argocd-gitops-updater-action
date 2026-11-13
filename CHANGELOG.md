@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.8](https://github.com/drumandbytes/argocd-gitops-updater-action/compare/v2.2.7...v2.2.8) (2026-11-13)
+
+
+### Bug Fixes
+
+* **deps:** bump peter-evans/create-pull-request ([#56](https://github.com/drumandbytes/argocd-gitops-updater-action/issues/56)) ([c264183](https://github.com/drumandbytes/argocd-gitops-updater-action/commit/c264183031e538226ace97c05b358f9e69badbb8))
+
 ## [2.2.7](https://github.com/drumandbytes/argocd-gitops-updater-action/compare/v2.2.6...v2.2.7) (2026-10-04)
 
 
